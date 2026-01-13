@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+
+async def test_output_spec_defaults_get_and_patch(client):
+    got = await client.get("/api/settings/output-spec")
+    assert got.status_code == 200
+    body = got.json()
+    assert body["language"] == "zh-CN"
+    assert body["script_format"] == "screenplay_int_ext"
+    assert body["script_format_notes"] is None
+
+    patched = await client.patch(
+        "/api/settings/output-spec",
+        json={"language": "en-US", "script_format": "stage_play", "script_format_notes": "偏舞台剧"},
+    )
+    assert patched.status_code == 200
+    patched_body = patched.json()
+    assert patched_body["language"] == "en-US"
+    assert patched_body["script_format"] == "stage_play"
+    assert patched_body["script_format_notes"] == "偏舞台剧"
+
+    got2 = await client.get("/api/settings/output-spec")
+    assert got2.status_code == 200
+    body2 = got2.json()
+    assert body2["language"] == "en-US"
+    assert body2["script_format"] == "stage_play"
+
+
+async def test_snapshot_materializes_effective_output_spec(client):
+    await client.patch(
+        "/api/settings/output-spec",
+        json={"language": "en-US", "script_format": "stage_play", "script_format_notes": None},
+    )
+
+    brief = await client.post(
+        "/api/briefs",
+        json={"title": "测试作品", "content": {"output_spec": {"script_format": "screenplay_int_ext"}}},
+    )
+    assert brief.status_code == 200
+    brief_id = brief.json()["id"]
+
+    snap = await client.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    assert snap.status_code == 200
+    snap_content = snap.json()["content"]
+    assert snap_content["output_spec"]["language"] == "en-US"
+    assert snap_content["output_spec"]["script_format"] == "screenplay_int_ext"
+
+
+async def test_patch_output_spec_can_clear_overrides(client):
+    brief = await client.post("/api/briefs", json={"title": "测试作品"})
+    assert brief.status_code == 200
+    brief_id = brief.json()["id"]
+
+    patched = await client.patch(
+        f"/api/briefs/{brief_id}/output-spec",
+        json={"script_format": "stage_play"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["content"]["output_spec"]["script_format"] == "stage_play"
+
+    cleared = await client.patch(
+        f"/api/briefs/{brief_id}/output-spec",
+        json={"script_format": None},
+    )
+    assert cleared.status_code == 200
+    assert "script_format" not in cleared.json()["content"]["output_spec"]
+
