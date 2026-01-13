@@ -20,6 +20,7 @@ class OutputSpecResolved(BaseModel):
     language: str = Field(default="zh-CN")
     script_format: ScriptFormat = Field(default=ScriptFormat.screenplay_int_ext)
     script_format_notes: str | None = None
+    max_fix_attempts: int = Field(default=2)
 
 
 class OutputSpecOverrides(BaseModel):
@@ -28,6 +29,7 @@ class OutputSpecOverrides(BaseModel):
     language: str | None = None
     script_format: ScriptFormat | None = None
     script_format_notes: str | None = None
+    max_fix_attempts: int | None = None
 
 
 class BriefContent(BaseModel):
@@ -77,3 +79,4 @@ class OutputSpecPatch(BaseModel):
     language: str | None = None
     script_format: ScriptFormat | None = None
     script_format_notes: str | None = None
+    max_fix_attempts: int | None = None

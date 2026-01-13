@@ -10,8 +10,16 @@ from app.llm.embeddings_client import EmbeddingsClient
 
 
 class OpenAIChatClient:
-    def __init__(self, *, api_key: str, model: str, timeout_s: float, base_url: str | None = None) -> None:
-        kwargs: dict[str, object] = {"api_key": api_key, "timeout": timeout_s}
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        timeout_s: float,
+        max_retries: int = 2,
+        base_url: str | None = None,
+    ) -> None:
+        kwargs: dict[str, object] = {"api_key": api_key, "timeout": timeout_s, "max_retries": max_retries}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = AsyncOpenAI(**kwargs)
@@ -25,6 +33,7 @@ class OpenAIChatClient:
             api_key=settings.openai_api_key,
             model=settings.openai_model,
             timeout_s=settings.openai_timeout_s,
+            max_retries=settings.openai_max_retries,
             base_url=settings.resolved_openai_base_url(),
         )
 
@@ -59,8 +68,16 @@ class OpenAIChatClient:
 
 
 class OpenAIEmbeddingsClient:
-    def __init__(self, *, api_key: str, model: str, timeout_s: float, base_url: str | None = None) -> None:
-        kwargs: dict[str, object] = {"api_key": api_key, "timeout": timeout_s}
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        timeout_s: float,
+        max_retries: int = 2,
+        base_url: str | None = None,
+    ) -> None:
+        kwargs: dict[str, object] = {"api_key": api_key, "timeout": timeout_s, "max_retries": max_retries}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = AsyncOpenAI(**kwargs)
@@ -74,6 +91,7 @@ class OpenAIEmbeddingsClient:
             api_key=settings.openai_api_key,
             model=settings.openai_embeddings_model,
             timeout_s=settings.openai_timeout_s,
+            max_retries=settings.openai_max_retries,
             base_url=settings.resolved_openai_base_url(),
         )
 

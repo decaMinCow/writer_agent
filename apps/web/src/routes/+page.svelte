@@ -88,6 +88,7 @@
 	let globalLanguageDraft = 'zh-CN';
 	let globalScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
 	let globalScriptNotesDraft = '';
+	let globalMaxFixAttemptsDraft = '2';
 	let savingGlobalPrefs = false;
 
 	let llmProviderSettings: LlmProviderSettings | null = null;
@@ -95,6 +96,7 @@
 	let providerModelDraft = '';
 	let providerEmbeddingsModelDraft = '';
 	let providerTimeoutDraft = '60';
+	let providerMaxRetriesDraft = '2';
 	let providerApiKeyDraft = '';
 	let savingProviderSettings = false;
 
@@ -106,9 +108,11 @@
 	let overrideLanguage = false;
 	let overrideScriptFormat = false;
 	let overrideScriptNotes = false;
+	let overrideMaxFixAttempts = false;
 	let briefLanguageDraft = 'zh-CN';
 	let briefScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
 	let briefScriptNotesDraft = '';
+	let briefMaxFixAttemptsDraft = '2';
 	let savingBriefPrefs = false;
 	let showBriefJson = false;
 	let showSnapshotJson = false;
@@ -132,6 +136,7 @@
 	let interventionTextarea: HTMLTextAreaElement | null = null;
 	let interventionSteps: WorkflowStepRunRead[] = [];
 	let lastFailedStep: WorkflowStepRunRead | null = null;
+	let llmStreamByStep: Record<string, string> = {};
 
 	let artifacts: ArtifactRead[] = [];
 	let selectedArtifact: ArtifactRead | null = null;
@@ -234,6 +239,12 @@
 			merged.script_format_notes =
 				v === null || typeof v === 'string' ? (v as any) : merged.script_format_notes;
 		}
+		if (hasOwn(overrides, 'max_fix_attempts')) {
+			const v = (overrides as any).max_fix_attempts;
+			const parsed =
+				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
+			if (Number.isFinite(parsed) && parsed >= 0) merged.max_fix_attempts = parsed;
+		}
 
 		return merged;
 	}
@@ -243,6 +254,7 @@
 		globalLanguageDraft = globalOutputSpec.language;
 		globalScriptFormatDraft = globalOutputSpec.script_format;
 		globalScriptNotesDraft = globalOutputSpec.script_format_notes ?? '';
+		globalMaxFixAttemptsDraft = String(globalOutputSpec.max_fix_attempts ?? 2);
 	}
 
 	function syncProviderDrafts() {
@@ -254,6 +266,7 @@
 			llmProviderSettings.timeout_s !== undefined && llmProviderSettings.timeout_s !== null
 				? String(llmProviderSettings.timeout_s)
 				: '60';
+		providerMaxRetriesDraft = String(llmProviderSettings.max_retries ?? 2);
 		providerApiKeyDraft = '';
 	}
 
@@ -265,10 +278,12 @@
 		overrideLanguage = hasOwn(overrides, 'language');
 		overrideScriptFormat = hasOwn(overrides, 'script_format');
 		overrideScriptNotes = hasOwn(overrides, 'script_format_notes');
+		overrideMaxFixAttempts = hasOwn(overrides, 'max_fix_attempts');
 
 		briefLanguageDraft = effective?.language ?? 'zh-CN';
 		briefScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
 		briefScriptNotesDraft = effective?.script_format_notes ?? '';
+		briefMaxFixAttemptsDraft = String(effective?.max_fix_attempts ?? 2);
 
 		if (overrideLanguage && typeof overrides.language === 'string') {
 			briefLanguageDraft = overrides.language;
@@ -279,6 +294,12 @@
 		if (overrideScriptNotes) {
 			const v = overrides.script_format_notes;
 			briefScriptNotesDraft = v === null ? '' : typeof v === 'string' ? v : '';
+		}
+		if (overrideMaxFixAttempts) {
+			const v = (overrides as any).max_fix_attempts;
+			const parsed =
+				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
+			if (Number.isFinite(parsed) && parsed >= 0) briefMaxFixAttemptsDraft = String(parsed);
 		}
 	}
 
@@ -325,6 +346,7 @@
 				model?: string | null;
 				embeddings_model?: string | null;
 				timeout_s?: number | null;
+				max_retries?: number | null;
 				api_key?: string | null;
 			} = {
 				base_url: providerBaseUrlDraft.trim() || null,
@@ -334,6 +356,9 @@
 
 			const timeout = Number(providerTimeoutDraft);
 			payload.timeout_s = Number.isFinite(timeout) && timeout > 0 ? timeout : null;
+
+			const maxRetries = Number(providerMaxRetriesDraft);
+			payload.max_retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : null;
 
 			const key = providerApiKeyDraft.trim();
 			if (key) {
@@ -401,6 +426,7 @@
 		autoRunning = false;
 		selectedRun = run;
 		runStateDraft = JSON.stringify(run.state, null, 2);
+		llmStreamByStep = {};
 		selectedArtifact = null;
 		selectedStep = null;
 		artifactVersions = [];
@@ -419,6 +445,7 @@
 		closeRunEvents();
 		autoRunning = false;
 		selectedArtifact = artifact;
+		llmStreamByStep = {};
 		selectedBrief = null;
 		selectedRun = null;
 		selectedSnapshot = null;
@@ -948,10 +975,12 @@
 		error = null;
 		savingGlobalPrefs = true;
 		try {
+			const maxFix = Number(globalMaxFixAttemptsDraft);
 			globalOutputSpec = await patchGlobalOutputSpecDefaults({
 				language: globalLanguageDraft.trim() || null,
 				script_format: globalScriptFormatDraft,
 				script_format_notes: globalScriptNotesDraft.trim() ? globalScriptNotesDraft.trim() : null,
+				max_fix_attempts: Number.isFinite(maxFix) && maxFix >= 0 ? Math.floor(maxFix) : null,
 			});
 			syncGlobalDrafts();
 			syncBriefOverrideDrafts();
@@ -967,10 +996,14 @@
 		error = null;
 		savingBriefPrefs = true;
 		try {
+			const maxFix = Number(briefMaxFixAttemptsDraft);
+			const parsedMaxFix =
+				Number.isFinite(maxFix) && maxFix >= 0 ? Math.floor(maxFix) : null;
 			const updated = await patchBriefOutputSpecOverrides(selectedBrief.id, {
 				language: overrideLanguage ? briefLanguageDraft.trim() || null : null,
 				script_format: overrideScriptFormat ? briefScriptFormatDraft : null,
 				script_format_notes: overrideScriptNotes ? briefScriptNotesDraft : null,
+				max_fix_attempts: overrideMaxFixAttempts ? parsedMaxFix : null,
 			});
 			selectedBrief = updated;
 			await refreshAll();
@@ -987,6 +1020,7 @@
 		overrideLanguage = false;
 		overrideScriptFormat = false;
 		overrideScriptNotes = false;
+		overrideMaxFixAttempts = false;
 		await saveBriefPrefs();
 	}
 
@@ -1190,6 +1224,12 @@
 				return ai - bi;
 			});
 		}
+		if (step.status === 'running' && selectedRun?.id === step.workflow_run_id) {
+			selectedStep = step;
+			if (!(step.id in llmStreamByStep)) {
+				llmStreamByStep = { ...llmStreamByStep, [step.id]: '' };
+			}
+		}
 		if (selectedStep?.id === step.id) {
 			selectedStep = step;
 		}
@@ -1214,6 +1254,42 @@
 			try {
 				const payload = JSON.parse((evt as MessageEvent).data) as { step: WorkflowStepRunRead };
 				upsertStep(payload.step);
+			} catch (e) {
+				// ignore
+			}
+		});
+
+		es.addEventListener('llm_start', (evt) => {
+			try {
+				const payload = JSON.parse((evt as MessageEvent).data) as {
+					step_id: string;
+					step_name?: string;
+				};
+				if (!payload.step_id) return;
+				llmStreamByStep = { ...llmStreamByStep, [payload.step_id]: '' };
+			} catch (e) {
+				// ignore
+			}
+		});
+
+		es.addEventListener('llm_delta', (evt) => {
+			try {
+				const payload = JSON.parse((evt as MessageEvent).data) as { step_id: string; append: string };
+				if (!payload.step_id) return;
+				const existing = llmStreamByStep[payload.step_id] ?? '';
+				llmStreamByStep = { ...llmStreamByStep, [payload.step_id]: existing + (payload.append ?? '') };
+			} catch (e) {
+				// ignore
+			}
+		});
+
+		es.addEventListener('llm_end', (evt) => {
+			try {
+				const payload = JSON.parse((evt as MessageEvent).data) as { step_id: string };
+				if (!payload.step_id) return;
+				if (!(payload.step_id in llmStreamByStep)) {
+					llmStreamByStep = { ...llmStreamByStep, [payload.step_id]: '' };
+				}
 			} catch (e) {
 				// ignore
 			}
@@ -1942,6 +2018,18 @@
 										<div class="mb-2 text-xs font-semibold text-zinc-300">
 											Step 输出 · {selectedStep.step_name}
 										</div>
+										{#if selectedStep.status === 'running' ||
+										((llmStreamByStep[selectedStep.id] ?? '').length > 0)}
+											<div class="mb-2 rounded border border-zinc-800 bg-zinc-950/30 p-2">
+												<div class="mb-1 text-[10px] font-semibold text-zinc-300">
+													实时输出（流式）
+												</div>
+												<pre
+													class="max-h-52 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-zinc-200">{llmStreamByStep[
+														selectedStep.id
+													] || '等待模型输出…'}</pre>
+											</div>
+										{/if}
 										{#if (selectedStep.outputs as any)?.fact_digest || (selectedStep.outputs as any)?.tone_digest}
 											<div class="mb-2 grid grid-cols-2 gap-2 text-[11px]">
 												<div class="rounded border border-zinc-800 bg-zinc-950/30 p-2">
@@ -2041,6 +2129,17 @@
 									/>
 								</label>
 								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">Max Retries（连接重试次数）</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										type="number"
+										min="0"
+										step="1"
+										bind:value={providerMaxRetriesDraft}
+										disabled={savingProviderSettings}
+									/>
+								</label>
+								<label class="block">
 									<div class="mb-1 text-[10px] text-zinc-500">API Key（不回显）</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
@@ -2123,6 +2222,17 @@
 										disabled={savingGlobalPrefs}
 									></textarea>
 								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">自动修复最大次数（default）</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										type="number"
+										min="0"
+										step="1"
+										bind:value={globalMaxFixAttemptsDraft}
+										disabled={savingGlobalPrefs}
+									/>
+								</label>
 								<button
 									class="w-full rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
 									onclick={saveGlobalPrefs}
@@ -2188,6 +2298,7 @@
 								{#if effective}
 									<div class="mb-2 text-[11px] text-zinc-500">
 										Effective：{effective.language} · {effective.script_format}
+										· 自动修复 {effective.max_fix_attempts} 次
 										{#if effective.script_format_notes}
 											· {effective.script_format_notes}
 										{/if}
@@ -2237,6 +2348,21 @@
 										bind:value={briefScriptNotesDraft}
 										disabled={!overrideScriptNotes || savingBriefPrefs}
 									></textarea>
+								</div>
+
+								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
+									<label class="flex items-center gap-2 text-zinc-200">
+										<input type="checkbox" bind:checked={overrideMaxFixAttempts} />
+										<span>覆盖自动修复次数</span>
+									</label>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
+										type="number"
+										min="0"
+										step="1"
+										bind:value={briefMaxFixAttemptsDraft}
+										disabled={!overrideMaxFixAttempts || savingBriefPrefs}
+									/>
 								</div>
 							</div>
 

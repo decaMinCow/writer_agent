@@ -319,6 +319,12 @@ async def patch_output_spec(
         else:
             output_spec["script_format_notes"] = payload.script_format_notes
 
+    if "max_fix_attempts" in payload.model_fields_set:
+        if payload.max_fix_attempts is None:
+            output_spec.pop("max_fix_attempts", None)
+        else:
+            output_spec["max_fix_attempts"] = payload.max_fix_attempts
+
     content["output_spec"] = output_spec
     brief.content = content
 

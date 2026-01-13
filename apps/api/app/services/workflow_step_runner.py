@@ -95,7 +95,7 @@ async def execute_one_step(
 
     try:
         outputs: dict[str, Any] = await execute_next_step(
-            session=session, llm=llm, embeddings=embeddings, run=run
+            session=session, llm=llm, embeddings=embeddings, run=run, hub=hub, step_id=step.id
         )
         if run.status == RunStatus.failed:
             step.status = RunStatus.failed

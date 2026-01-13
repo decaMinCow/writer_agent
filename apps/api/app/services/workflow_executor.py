@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -35,6 +36,7 @@ from app.services.json_utils import deep_merge
 from app.services.memory_store import index_artifact_version, retrieve_evidence
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
 from app.services.text_utils import apply_replacements, join_paragraphs, numbered_paragraphs
+from app.services.workflow_events import WorkflowEventHub
 
 
 def _now() -> datetime:
@@ -48,6 +50,107 @@ def _cursor(state: dict[str, Any]) -> dict[str, Any]:
     cursor = {"phase": None}
     state["cursor"] = cursor
     return cursor
+
+
+def _rag_state(state: dict[str, Any]) -> dict[str, Any]:
+    rag = state.get("rag")
+    if isinstance(rag, dict):
+        return rag
+    rag = {}
+    state["rag"] = rag
+    return rag
+
+
+def _should_disable_embeddings(exc: BaseException) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {404, 405}:
+        return True
+    message = str(exc).lower()
+    if "embeddings" in message and ("405" in message or "method not allowed" in message):
+        return True
+    return False
+
+
+def _record_embeddings_error(*, state: dict[str, Any], where: str, exc: BaseException) -> None:
+    rag = _rag_state(state)
+    rag["last_error"] = format_exception_chain(exc)
+    rag["last_error_at"] = where
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        rag["last_status_code"] = status_code
+    if _should_disable_embeddings(exc):
+        rag["disabled"] = True
+        rag["disabled_reason"] = "embeddings_endpoint_not_supported"
+
+ 
+def _rag_is_disabled(state: dict[str, Any]) -> bool:
+    return bool(_rag_state(state).get("disabled"))
+
+
+def _resolve_max_fix_attempts(brief_json: object) -> int:
+    default = 2
+    if not isinstance(brief_json, dict):
+        return default
+    output_spec = brief_json.get("output_spec")
+    if not isinstance(output_spec, dict):
+        return default
+    raw = output_spec.get("max_fix_attempts")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    if value < 0:
+        value = 0
+    return value
+
+
+async def _llm_complete_with_optional_stream(
+    *,
+    llm: LLMClient,
+    system_prompt: str,
+    user_prompt: str,
+    hub: WorkflowEventHub | None,
+    run_id: uuid.UUID,
+    step_id: uuid.UUID | None,
+    step_name: str,
+    flush_chars: int = 800,
+    flush_interval_s: float = 0.25,
+) -> str:
+    if hub is None or step_id is None or not hasattr(llm, "stream_complete"):
+        return await llm.complete(system_prompt=system_prompt, user_prompt=user_prompt)
+
+    await hub.publish(
+        run_id=run_id,
+        name="llm_start",
+        payload={"step_id": str(step_id), "step_name": step_name},
+    )
+
+    raw_output = ""
+    buffer = ""
+    last_flush = time.monotonic()
+
+    async for delta in llm.stream_complete(system_prompt=system_prompt, user_prompt=user_prompt):
+        raw_output += delta
+        buffer += delta
+        now = time.monotonic()
+        if len(buffer) >= flush_chars or (now - last_flush) >= flush_interval_s:
+            await hub.publish(
+                run_id=run_id,
+                name="llm_delta",
+                payload={"step_id": str(step_id), "append": buffer},
+            )
+            buffer = ""
+            last_flush = now
+
+    if buffer:
+        await hub.publish(
+            run_id=run_id,
+            name="llm_delta",
+            payload={"step_id": str(step_id), "append": buffer},
+        )
+
+    await hub.publish(run_id=run_id, name="llm_end", payload={"step_id": str(step_id)})
+    return raw_output
 
 
 async def _select_latest_novel_chapter_versions(
@@ -131,6 +234,8 @@ async def execute_next_step(
     llm: LLMClient,
     embeddings: EmbeddingsClient,
     run: WorkflowRun,
+    hub: WorkflowEventHub | None = None,
+    step_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     state: dict[str, Any] = dict(run.state or {})
     cursor = _cursor(state)
@@ -138,18 +243,24 @@ async def execute_next_step(
     snapshot = await _get_snapshot(session, run.brief_snapshot_id)
     brief_json = snapshot.content
     current_state: dict[str, Any] = dict(state.get("current_state") or {})
+    max_fix_attempts = _resolve_max_fix_attempts(brief_json)
 
     if run.kind == WorkflowKind.novel:
         phase = cursor.get("phase") or "novel_outline"
         chapter_index = int(cursor.get("chapter_index") or 1)
 
         if phase == "novel_outline":
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("novel_outline_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("novel_outline_user.md"),
                     {"BRIEF_JSON": json.dumps(brief_json, ensure_ascii=False, indent=2)},
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="novel_outline",
             )
             payload = extract_json_object(raw)
             outline = NovelOutline.model_validate(payload)
@@ -161,7 +272,8 @@ async def execute_next_step(
 
         if phase == "novel_beats":
             outline_json = state.get("outline") or {}
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("novel_beats_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("novel_beats_user.md"),
@@ -170,6 +282,10 @@ async def execute_next_step(
                         "OUTLINE_JSON": json.dumps(outline_json, ensure_ascii=False, indent=2),
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="novel_beats",
             )
             payload = extract_json_object(raw)
             beats = NovelBeats.model_validate(payload)
@@ -194,15 +310,21 @@ async def execute_next_step(
 
         if phase == "novel_chapter_draft":
             query = f"第{chapter.index}章 {chapter.title} {','.join(chapter.beats[:3])}"
-            evidence_chunks = await retrieve_evidence(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                query=query,
-                limit=6,
-            )
+            evidence_chunks = []
+            if not _rag_is_disabled(state):
+                try:
+                    evidence_chunks = await retrieve_evidence(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        query=query,
+                        limit=6,
+                    )
+                except Exception as exc:
+                    _record_embeddings_error(state=state, where="novel_chapter_draft:retrieve_evidence", exc=exc)
             evidence_text = "\n\n---\n\n".join([c.content_text for c in evidence_chunks])
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("novel_draft_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("novel_draft_user.md"),
@@ -215,6 +337,10 @@ async def execute_next_step(
                         "EVIDENCE_TEXT": evidence_text or "(none)",
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="novel_chapter_draft",
             )
             payload = extract_json_object(raw)
             draft = DraftResult.model_validate(payload)
@@ -229,15 +355,21 @@ async def execute_next_step(
             draft_text = str(draft_state.get("text") or "")
             paragraphs, numbered = numbered_paragraphs(draft_text)
             query = f"Critic 第{chapter.index}章 {chapter.title}"
-            evidence_chunks = await retrieve_evidence(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                query=query,
-                limit=6,
-            )
+            evidence_chunks = []
+            if not _rag_is_disabled(state):
+                try:
+                    evidence_chunks = await retrieve_evidence(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        query=query,
+                        limit=6,
+                    )
+                except Exception as exc:
+                    _record_embeddings_error(state=state, where="novel_chapter_critic:retrieve_evidence", exc=exc)
             evidence_text = "\n\n---\n\n".join([c.content_text for c in evidence_chunks])
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("critic_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("critic_user.md"),
@@ -248,6 +380,10 @@ async def execute_next_step(
                         "EVIDENCE_TEXT": evidence_text or "(none)",
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="novel_chapter_critic",
             )
             payload = extract_json_object(raw)
             critic = CriticResult.model_validate(payload)
@@ -255,7 +391,7 @@ async def execute_next_step(
 
             fix_attempt = int(state.get("fix_attempt") or 0)
             if not critic.hard_pass or critic.rewrite_paragraph_indices:
-                if fix_attempt >= 2:
+                if fix_attempt >= max_fix_attempts:
                     run.status = RunStatus.failed
                     run.error = {"detail": "max_fix_attempts_exceeded", "hard_errors": critic.hard_errors}
                     run.state = state
@@ -282,7 +418,8 @@ async def execute_next_step(
             draft_text = str(draft_state.get("text") or "")
             paragraphs, numbered = numbered_paragraphs(draft_text)
 
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("rewrite_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("rewrite_user.md"),
@@ -296,6 +433,10 @@ async def execute_next_step(
                         ),
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="novel_chapter_fix",
             )
             payload = extract_json_object(raw)
             rewrite = RewriteResult.model_validate(payload)
@@ -352,14 +493,19 @@ async def execute_next_step(
             await session.commit()
             await session.refresh(version)
 
-            await index_artifact_version(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                artifact_version_id=version.id,
-                content_text=draft_text,
-                meta={"kind": "novel_chapter", "ordinal": chapter.index},
-            )
+            if not _rag_is_disabled(state):
+                try:
+                    await index_artifact_version(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        artifact_version_id=version.id,
+                        content_text=draft_text,
+                        meta={"kind": "novel_chapter", "ordinal": chapter.index},
+                    )
+                except Exception as exc:
+                    await session.rollback()
+                    _record_embeddings_error(state=state, where="novel_chapter_commit:index_artifact_version", exc=exc)
 
             current_state = deep_merge(current_state, critic.state_patch)
             state["current_state"] = current_state
@@ -390,12 +536,17 @@ async def execute_next_step(
         scene_index = int(cursor.get("scene_index") or 1)
 
         if phase == "script_scene_list":
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("script_scene_list_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("script_scene_list_user.md"),
                     {"BRIEF_JSON": json.dumps(brief_json, ensure_ascii=False, indent=2)},
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="script_scene_list",
             )
             payload = extract_json_object(raw)
             scene_list = ScriptSceneList.model_validate(payload)
@@ -421,15 +572,21 @@ async def execute_next_step(
         if phase == "script_scene_draft":
             output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
             query = f"Scene {scene.slug} {scene.title} {scene.location} {scene.time}"
-            evidence_chunks = await retrieve_evidence(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                query=query,
-                limit=6,
-            )
+            evidence_chunks = []
+            if not _rag_is_disabled(state):
+                try:
+                    evidence_chunks = await retrieve_evidence(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        query=query,
+                        limit=6,
+                    )
+                except Exception as exc:
+                    _record_embeddings_error(state=state, where="script_scene_draft:retrieve_evidence", exc=exc)
             evidence_text = "\n\n---\n\n".join([c.content_text for c in evidence_chunks])
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("script_scene_draft_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("script_scene_draft_user.md"),
@@ -444,6 +601,10 @@ async def execute_next_step(
                         "EVIDENCE_TEXT": evidence_text or "(none)",
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="script_scene_draft",
             )
             payload = extract_json_object(raw)
             draft = DraftResult.model_validate(payload)
@@ -458,15 +619,21 @@ async def execute_next_step(
             draft_text = str(draft_state.get("text") or "")
             paragraphs, numbered = numbered_paragraphs(draft_text)
             query = f"Critic Scene {scene.slug} {scene.title}"
-            evidence_chunks = await retrieve_evidence(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                query=query,
-                limit=6,
-            )
+            evidence_chunks = []
+            if not _rag_is_disabled(state):
+                try:
+                    evidence_chunks = await retrieve_evidence(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        query=query,
+                        limit=6,
+                    )
+                except Exception as exc:
+                    _record_embeddings_error(state=state, where="script_scene_critic:retrieve_evidence", exc=exc)
             evidence_text = "\n\n---\n\n".join([c.content_text for c in evidence_chunks])
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("critic_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("critic_user.md"),
@@ -477,6 +644,10 @@ async def execute_next_step(
                         "EVIDENCE_TEXT": evidence_text or "(none)",
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="script_scene_critic",
             )
             payload = extract_json_object(raw)
             critic = CriticResult.model_validate(payload)
@@ -484,7 +655,7 @@ async def execute_next_step(
 
             fix_attempt = int(state.get("fix_attempt") or 0)
             if not critic.hard_pass or critic.rewrite_paragraph_indices:
-                if fix_attempt >= 2:
+                if fix_attempt >= max_fix_attempts:
                     run.status = RunStatus.failed
                     run.error = {"detail": "max_fix_attempts_exceeded", "hard_errors": critic.hard_errors}
                     run.state = state
@@ -511,7 +682,8 @@ async def execute_next_step(
             draft_text = str(draft_state.get("text") or "")
             paragraphs, numbered = numbered_paragraphs(draft_text)
 
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("rewrite_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("rewrite_user.md"),
@@ -525,6 +697,10 @@ async def execute_next_step(
                         ),
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="script_scene_fix",
             )
             payload = extract_json_object(raw)
             rewrite = RewriteResult.model_validate(payload)
@@ -576,14 +752,19 @@ async def execute_next_step(
             await session.commit()
             await session.refresh(version)
 
-            await index_artifact_version(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                artifact_version_id=version.id,
-                content_text=draft_text,
-                meta={"kind": "script_scene", "ordinal": scene.index},
-            )
+            if not _rag_is_disabled(state):
+                try:
+                    await index_artifact_version(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        artifact_version_id=version.id,
+                        content_text=draft_text,
+                        meta={"kind": "script_scene", "ordinal": scene.index},
+                    )
+                except Exception as exc:
+                    await session.rollback()
+                    _record_embeddings_error(state=state, where="script_scene_commit:index_artifact_version", exc=exc)
 
             current_state = deep_merge(current_state, critic.state_patch)
             state["current_state"] = current_state
@@ -652,7 +833,8 @@ async def execute_next_step(
 
             state["novel_source"] = {"artifact_version_ids": source_version_ids, "chapter_digests": digests}
 
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("nts_scene_list_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("nts_scene_list_user.md"),
@@ -663,6 +845,10 @@ async def execute_next_step(
                         ),
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="nts_scene_list",
             )
             payload = extract_json_object(raw)
             scene_list = ScriptSceneList.model_validate(payload)
@@ -693,18 +879,24 @@ async def execute_next_step(
         if phase == "nts_scene_draft":
             output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
             query = f"NTS Scene {scene.slug} {scene.title} {scene.location} {scene.time} {' '.join(scene.characters)} {scene.purpose}"
-            evidence_chunks = await retrieve_evidence(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                query=query,
-                limit=8,
-            )
+            evidence_chunks = []
+            if not _rag_is_disabled(state):
+                try:
+                    evidence_chunks = await retrieve_evidence(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        query=query,
+                        limit=8,
+                    )
+                except Exception as exc:
+                    _record_embeddings_error(state=state, where="nts_scene_draft:retrieve_evidence", exc=exc)
             evidence_text = "\n\n---\n\n".join([c.content_text for c in evidence_chunks])
             if digest_lines:
                 evidence_text = (digest_lines + ("\n\n---\n\n" + evidence_text if evidence_text else "")).strip()
 
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("nts_scene_draft_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("nts_scene_draft_user.md"),
@@ -719,6 +911,10 @@ async def execute_next_step(
                         "EVIDENCE_TEXT": evidence_text or "(none)",
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="nts_scene_draft",
             )
             payload = extract_json_object(raw)
             draft = DraftResult.model_validate(payload)
@@ -734,18 +930,24 @@ async def execute_next_step(
             paragraphs, numbered = numbered_paragraphs(draft_text)
 
             query = f"NTS Critic {scene.slug} {scene.title}"
-            evidence_chunks = await retrieve_evidence(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                query=query,
-                limit=8,
-            )
+            evidence_chunks = []
+            if not _rag_is_disabled(state):
+                try:
+                    evidence_chunks = await retrieve_evidence(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        query=query,
+                        limit=8,
+                    )
+                except Exception as exc:
+                    _record_embeddings_error(state=state, where="nts_scene_critic:retrieve_evidence", exc=exc)
             evidence_text = "\n\n---\n\n".join([c.content_text for c in evidence_chunks])
             if digest_lines:
                 evidence_text = (digest_lines + ("\n\n---\n\n" + evidence_text if evidence_text else "")).strip()
 
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("nts_critic_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("nts_critic_user.md"),
@@ -756,6 +958,10 @@ async def execute_next_step(
                         "EVIDENCE_TEXT": evidence_text or "(none)",
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="nts_scene_critic",
             )
             payload = extract_json_object(raw)
             critic = CriticResult.model_validate(payload)
@@ -763,7 +969,7 @@ async def execute_next_step(
 
             fix_attempt = int(state.get("fix_attempt") or 0)
             if not critic.hard_pass or critic.rewrite_paragraph_indices:
-                if fix_attempt >= 2:
+                if fix_attempt >= max_fix_attempts:
                     run.status = RunStatus.failed
                     run.error = {"detail": "max_fix_attempts_exceeded", "hard_errors": critic.hard_errors}
                     run.state = state
@@ -790,7 +996,8 @@ async def execute_next_step(
             draft_text = str(draft_state.get("text") or "")
             paragraphs, numbered = numbered_paragraphs(draft_text)
 
-            raw = await llm.complete(
+            raw = await _llm_complete_with_optional_stream(
+                llm=llm,
                 system_prompt=load_prompt("rewrite_system.md"),
                 user_prompt=render_prompt(
                     load_prompt("rewrite_user.md"),
@@ -804,6 +1011,10 @@ async def execute_next_step(
                         ),
                     },
                 ),
+                hub=hub,
+                run_id=run.id,
+                step_id=step_id,
+                step_name="nts_scene_fix",
             )
             payload = extract_json_object(raw)
             rewrite = RewriteResult.model_validate(payload)
@@ -856,14 +1067,19 @@ async def execute_next_step(
             await session.commit()
             await session.refresh(version)
 
-            await index_artifact_version(
-                session=session,
-                embeddings=embeddings,
-                brief_snapshot_id=snapshot.id,
-                artifact_version_id=version.id,
-                content_text=draft_text,
-                meta={"kind": "script_scene", "ordinal": scene.index},
-            )
+            if not _rag_is_disabled(state):
+                try:
+                    await index_artifact_version(
+                        session=session,
+                        embeddings=embeddings,
+                        brief_snapshot_id=snapshot.id,
+                        artifact_version_id=version.id,
+                        content_text=draft_text,
+                        meta={"kind": "script_scene", "ordinal": scene.index},
+                    )
+                except Exception as exc:
+                    await session.rollback()
+                    _record_embeddings_error(state=state, where="nts_scene_commit:index_artifact_version", exc=exc)
 
             current_state = deep_merge(current_state, critic.state_patch)
             state["current_state"] = current_state
@@ -914,7 +1130,9 @@ async def execute_next_step_safe(
     await session.refresh(step_run)
 
     try:
-        outputs = await execute_next_step(session=session, llm=llm, embeddings=embeddings, run=run)
+        outputs = await execute_next_step(
+            session=session, llm=llm, embeddings=embeddings, run=run, hub=None, step_id=step_run.id
+        )
         step_run.status = RunStatus.succeeded
         step_run.outputs = outputs
         step_run.finished_at = _now()

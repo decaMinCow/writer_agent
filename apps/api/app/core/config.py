@@ -31,6 +31,7 @@ class Settings(BaseSettings):
         default="text-embedding-3-small", validation_alias="OPENAI_EMBEDDINGS_MODEL"
     )
     openai_timeout_s: float = Field(default=60, validation_alias="OPENAI_TIMEOUT_S")
+    openai_max_retries: int = Field(default=2, validation_alias="OPENAI_MAX_RETRIES")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 

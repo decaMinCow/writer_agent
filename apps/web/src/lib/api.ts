@@ -33,6 +33,7 @@ export type OutputSpecDefaults = {
 	language: string;
 	script_format: ScriptFormat;
 	script_format_notes: string | null;
+	max_fix_attempts: number;
 	[key: string]: unknown;
 };
 
@@ -41,6 +42,7 @@ export type LlmProviderSettings = {
 	model: string;
 	embeddings_model: string;
 	timeout_s: number;
+	max_retries: number;
 	api_key_configured: boolean;
 	[key: string]: unknown;
 };
@@ -253,6 +255,7 @@ export async function patchGlobalOutputSpecDefaults(payload: {
 	language?: string | null;
 	script_format?: ScriptFormat | null;
 	script_format_notes?: string | null;
+	max_fix_attempts?: number | null;
 }): Promise<OutputSpecDefaults> {
 	return await fetchJson<OutputSpecDefaults>('/api/settings/output-spec', {
 		method: 'PATCH',
@@ -269,6 +272,7 @@ export async function patchLlmProviderSettings(payload: {
 	model?: string | null;
 	embeddings_model?: string | null;
 	timeout_s?: number | null;
+	max_retries?: number | null;
 	api_key?: string | null;
 }): Promise<LlmProviderSettings> {
 	return await fetchJson<LlmProviderSettings>('/api/settings/llm-provider', {
@@ -283,6 +287,7 @@ export async function patchBriefOutputSpecOverrides(
 		language?: string | null;
 		script_format?: ScriptFormat | null;
 		script_format_notes?: string | null;
+		max_fix_attempts?: number | null;
 	},
 ): Promise<BriefRead> {
 	return await fetchJson<BriefRead>(`/api/briefs/${briefId}/output-spec`, {

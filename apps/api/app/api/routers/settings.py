@@ -40,6 +40,8 @@ async def patch_output_spec_defaults_route(
         patch["script_format"] = payload.script_format
     if "script_format_notes" in payload.model_fields_set:
         patch["script_format_notes"] = payload.script_format_notes
+    if "max_fix_attempts" in payload.model_fields_set:
+        patch["max_fix_attempts"] = payload.max_fix_attempts
 
     resolved = await patch_output_spec_defaults(session=session, patch=patch)
     return OutputSpecDefaultsRead.model_validate(resolved)
@@ -70,6 +72,8 @@ async def patch_llm_provider_settings_route(
         patch["embeddings_model"] = payload.embeddings_model
     if "timeout_s" in payload.model_fields_set:
         patch["timeout_s"] = payload.timeout_s
+    if "max_retries" in payload.model_fields_set:
+        patch["max_retries"] = payload.max_retries
     if "api_key" in payload.model_fields_set:
         patch["api_key"] = payload.api_key
 

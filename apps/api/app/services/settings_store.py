@@ -16,6 +16,7 @@ SERVER_OUTPUT_SPEC_DEFAULTS: dict[str, Any] = {
     "language": "zh-CN",
     "script_format": ScriptFormat.screenplay_int_ext.value,
     "script_format_notes": None,
+    "max_fix_attempts": 2,
 }
 
 
@@ -37,6 +38,15 @@ async def get_output_spec_defaults(*, session: AsyncSession) -> dict[str, Any]:
         resolved["language"] = SERVER_OUTPUT_SPEC_DEFAULTS["language"]
     if not resolved.get("script_format"):
         resolved["script_format"] = SERVER_OUTPUT_SPEC_DEFAULTS["script_format"]
+
+    raw_max_fix = resolved.get("max_fix_attempts")
+    try:
+        max_fix_attempts = int(raw_max_fix)
+    except (TypeError, ValueError):
+        max_fix_attempts = int(SERVER_OUTPUT_SPEC_DEFAULTS["max_fix_attempts"])
+    if max_fix_attempts < 0:
+        max_fix_attempts = 0
+    resolved["max_fix_attempts"] = max_fix_attempts
 
     return resolved
 
@@ -91,6 +101,14 @@ def resolve_llm_provider_effective_config(
     except (TypeError, ValueError):
         timeout_s = float(env_settings.openai_timeout_s)
 
+    max_retries_raw = stored.get("max_retries")
+    try:
+        max_retries = int(max_retries_raw) if max_retries_raw is not None else int(env_settings.openai_max_retries)
+    except (TypeError, ValueError):
+        max_retries = int(env_settings.openai_max_retries)
+    if max_retries < 0:
+        max_retries = 0
+
     api_key = _normalize_optional_str(stored.get("api_key")) or (
         _normalize_optional_str(env_settings.openai_api_key) if env_settings.openai_api_key else None
     )
@@ -101,6 +119,7 @@ def resolve_llm_provider_effective_config(
         "model": model,
         "embeddings_model": embeddings_model,
         "timeout_s": timeout_s,
+        "max_retries": max_retries,
     }
 
 
@@ -118,6 +137,7 @@ async def get_llm_provider_settings(
         "model": effective.get("model"),
         "embeddings_model": effective.get("embeddings_model"),
         "timeout_s": effective.get("timeout_s"),
+        "max_retries": effective.get("max_retries"),
         "api_key_configured": api_key_configured,
     }
 
@@ -154,6 +174,8 @@ async def patch_llm_provider_settings(
                 stored[key] = cleaned
         elif key == "timeout_s":
             stored[key] = float(value)
+        elif key == "max_retries":
+            stored[key] = int(value)
         else:
             stored[key] = value
 

@@ -8,22 +8,30 @@ async def test_output_spec_defaults_get_and_patch(client):
     assert body["language"] == "zh-CN"
     assert body["script_format"] == "screenplay_int_ext"
     assert body["script_format_notes"] is None
+    assert body["max_fix_attempts"] == 2
 
     patched = await client.patch(
         "/api/settings/output-spec",
-        json={"language": "en-US", "script_format": "stage_play", "script_format_notes": "偏舞台剧"},
+        json={
+            "language": "en-US",
+            "script_format": "stage_play",
+            "script_format_notes": "偏舞台剧",
+            "max_fix_attempts": 3,
+        },
     )
     assert patched.status_code == 200
     patched_body = patched.json()
     assert patched_body["language"] == "en-US"
     assert patched_body["script_format"] == "stage_play"
     assert patched_body["script_format_notes"] == "偏舞台剧"
+    assert patched_body["max_fix_attempts"] == 3
 
     got2 = await client.get("/api/settings/output-spec")
     assert got2.status_code == 200
     body2 = got2.json()
     assert body2["language"] == "en-US"
     assert body2["script_format"] == "stage_play"
+    assert body2["max_fix_attempts"] == 3
 
 
 async def test_snapshot_materializes_effective_output_spec(client):
@@ -44,6 +52,7 @@ async def test_snapshot_materializes_effective_output_spec(client):
     snap_content = snap.json()["content"]
     assert snap_content["output_spec"]["language"] == "en-US"
     assert snap_content["output_spec"]["script_format"] == "screenplay_int_ext"
+    assert snap_content["output_spec"]["max_fix_attempts"] == 2
 
 
 async def test_patch_output_spec_can_clear_overrides(client):
@@ -75,6 +84,7 @@ async def test_llm_provider_settings_get_and_patch_and_clear(client):
     assert body["model"]  # has env default
     assert body["embeddings_model"]
     assert isinstance(body["timeout_s"], (int, float))
+    assert isinstance(body["max_retries"], int)
 
     patched = await client.patch(
         "/api/settings/llm-provider",
@@ -83,6 +93,7 @@ async def test_llm_provider_settings_get_and_patch_and_clear(client):
             "model": "gpt-test",
             "embeddings_model": "text-embedding-test",
             "timeout_s": 12,
+            "max_retries": 5,
             "api_key": "sk-test",
         },
     )
@@ -94,6 +105,7 @@ async def test_llm_provider_settings_get_and_patch_and_clear(client):
     assert patched_body["model"] == "gpt-test"
     assert patched_body["embeddings_model"] == "text-embedding-test"
     assert patched_body["timeout_s"] == 12
+    assert patched_body["max_retries"] == 5
 
     cleared = await client.patch("/api/settings/llm-provider", json={"api_key": None})
     assert cleared.status_code == 200

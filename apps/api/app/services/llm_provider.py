@@ -23,6 +23,7 @@ class EffectiveLlmProviderConfig:
     model: str
     embeddings_model: str
     timeout_s: float
+    max_retries: int
 
 
 def _settings_from_app(app: FastAPI) -> Settings:
@@ -46,6 +47,7 @@ async def resolve_effective_provider_config(
         model=str(effective.get("model") or settings.openai_model),
         embeddings_model=str(effective.get("embeddings_model") or settings.openai_embeddings_model),
         timeout_s=float(effective.get("timeout_s") or settings.openai_timeout_s),
+        max_retries=int(effective.get("max_retries") or settings.openai_max_retries),
     )
 
 
@@ -66,6 +68,7 @@ async def resolve_llm_client(
         base_url=cfg.base_url,
         model=cfg.model,
         timeout_s=cfg.timeout_s,
+        max_retries=cfg.max_retries,
     )
 
 
@@ -86,6 +89,7 @@ async def resolve_embeddings_client(
         base_url=cfg.base_url,
         model=cfg.embeddings_model,
         timeout_s=cfg.timeout_s,
+        max_retries=cfg.max_retries,
     )
 
 
@@ -114,6 +118,7 @@ async def resolve_llm_and_embeddings(
             base_url=cfg.base_url,
             model=cfg.model,
             timeout_s=cfg.timeout_s,
+            max_retries=cfg.max_retries,
         )
 
     if embeddings is None and cfg.api_key:
@@ -122,6 +127,7 @@ async def resolve_llm_and_embeddings(
             base_url=cfg.base_url,
             model=cfg.embeddings_model,
             timeout_s=cfg.timeout_s,
+            max_retries=cfg.max_retries,
         )
 
     meta = {
@@ -130,6 +136,7 @@ async def resolve_llm_and_embeddings(
             "model": cfg.model,
             "embeddings_model": cfg.embeddings_model,
             "timeout_s": cfg.timeout_s,
+            "max_retries": cfg.max_retries,
             "api_key_present": bool(cfg.api_key),
             "source": "db/env",
         }
