@@ -1,6 +1,6 @@
 import { env } from '$env/dynamic/public';
 
-const API_BASE = (env.PUBLIC_API_BASE_URL ?? 'http://localhost:8000').replace(/\/$/, '');
+const API_BASE = (env.PUBLIC_API_BASE_URL ?? 'http://localhost:9761').replace(/\/$/, '');
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`, {
@@ -33,6 +33,15 @@ export type OutputSpecDefaults = {
 	language: string;
 	script_format: ScriptFormat;
 	script_format_notes: string | null;
+	[key: string]: unknown;
+};
+
+export type LlmProviderSettings = {
+	base_url: string | null;
+	model: string;
+	embeddings_model: string;
+	timeout_s: number;
+	api_key_configured: boolean;
 	[key: string]: unknown;
 };
 
@@ -216,6 +225,16 @@ export async function listBriefSnapshots(briefId: string): Promise<BriefSnapshot
 	return await fetchJson<BriefSnapshotRead[]>(`/api/briefs/${briefId}/snapshots`);
 }
 
+export async function deleteBrief(briefId: string): Promise<{ deleted: boolean }> {
+	return await fetchJson<{ deleted: boolean }>(`/api/briefs/${briefId}`, { method: 'DELETE' });
+}
+
+export async function deleteBriefSnapshot(snapshotId: string): Promise<{ deleted: boolean }> {
+	return await fetchJson<{ deleted: boolean }>(`/api/brief-snapshots/${snapshotId}`, {
+		method: 'DELETE',
+	});
+}
+
 export async function createBriefSnapshot(
 	briefId: string,
 	payload: { label?: string | null },
@@ -236,6 +255,23 @@ export async function patchGlobalOutputSpecDefaults(payload: {
 	script_format_notes?: string | null;
 }): Promise<OutputSpecDefaults> {
 	return await fetchJson<OutputSpecDefaults>('/api/settings/output-spec', {
+		method: 'PATCH',
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function getLlmProviderSettings(): Promise<LlmProviderSettings> {
+	return await fetchJson<LlmProviderSettings>('/api/settings/llm-provider');
+}
+
+export async function patchLlmProviderSettings(payload: {
+	base_url?: string | null;
+	model?: string | null;
+	embeddings_model?: string | null;
+	timeout_s?: number | null;
+	api_key?: string | null;
+}): Promise<LlmProviderSettings> {
+	return await fetchJson<LlmProviderSettings>('/api/settings/llm-provider', {
 		method: 'PATCH',
 		body: JSON.stringify(payload),
 	});
@@ -294,12 +330,139 @@ export async function postBriefMessage(
 	});
 }
 
-export async function listWorkflowRuns(): Promise<WorkflowRunRead[]> {
-	return await fetchJson<WorkflowRunRead[]>('/api/workflow-runs');
+type SseEvent = { event: string; data: unknown };
+
+function parseSseEvent(raw: string): SseEvent | null {
+	const lines = raw.split('\n').filter((line) => line.length > 0);
+	if (lines.length === 0) return null;
+
+	let event = 'message';
+	const dataLines: string[] = [];
+	for (const line of lines) {
+		if (line.startsWith('event:')) {
+			event = line.slice('event:'.length).trim();
+		} else if (line.startsWith('data:')) {
+			dataLines.push(line.slice('data:'.length).trimStart());
+		}
+	}
+
+	const dataRaw = dataLines.join('\n');
+	let data: unknown = dataRaw;
+	if (dataRaw.length > 0) {
+		try {
+			data = JSON.parse(dataRaw) as unknown;
+		} catch {
+			data = dataRaw;
+		}
+	}
+
+	return { event, data };
+}
+
+export async function streamBriefMessage(
+	briefId: string,
+	payload: { content_text: string; mode?: GapReport['mode'] },
+	handlers: {
+		onAssistantDelta?: (append: string) => void;
+		onFinal?: (resp: BriefMessageCreateResponse) => void;
+		onError?: (detail: string) => void;
+		signal?: AbortSignal;
+	} = {},
+): Promise<void> {
+	const res = await fetch(`${API_BASE}/api/briefs/${briefId}/messages/stream`, {
+		method: 'POST',
+		body: JSON.stringify(payload),
+		signal: handlers.signal,
+		headers: {
+			accept: 'text/event-stream',
+			'content-type': 'application/json',
+		},
+	});
+
+	if (!res.ok) {
+		const text = await res.text().catch(() => '');
+		throw new Error(`api_error ${res.status} /api/briefs/${briefId}/messages/stream ${text}`);
+	}
+	if (!res.body) {
+		throw new Error('api_error_stream_no_body');
+	}
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+
+	while (true) {
+		const { value, done } = await reader.read();
+		if (done) break;
+
+		buffer += decoder.decode(value, { stream: true });
+		buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+		while (true) {
+			const sep = buffer.indexOf('\n\n');
+			if (sep === -1) break;
+			const rawEvent = buffer.slice(0, sep);
+			buffer = buffer.slice(sep + 2);
+
+			const evt = parseSseEvent(rawEvent);
+			if (!evt) continue;
+
+			if (evt.event === 'assistant_delta') {
+				const append = (evt.data as any)?.append;
+				if (typeof append === 'string' && append.length > 0) handlers.onAssistantDelta?.(append);
+				continue;
+			}
+			if (evt.event === 'status') {
+				// Optional: UI may use this to show "thinking..." state.
+				continue;
+			}
+			if (evt.event === 'final') {
+				handlers.onFinal?.(evt.data as BriefMessageCreateResponse);
+				try {
+					await reader.cancel();
+				} catch {
+					// ignore
+				}
+				return;
+			}
+			if (evt.event === 'error') {
+				const detail = (evt.data as any)?.detail;
+				const message = typeof detail === 'string' ? detail : 'stream_error';
+				handlers.onError?.(message);
+				throw new Error(message);
+			}
+		}
+	}
+}
+
+export async function listWorkflowRuns(briefSnapshotId?: string): Promise<WorkflowRunRead[]> {
+	const qs = briefSnapshotId ? `?brief_snapshot_id=${encodeURIComponent(briefSnapshotId)}` : '';
+	return await fetchJson<WorkflowRunRead[]>(`/api/workflow-runs${qs}`);
+}
+
+export async function deleteWorkflowRun(runId: string): Promise<{ deleted: boolean }> {
+	return await fetchJson<{ deleted: boolean }>(`/api/workflow-runs/${runId}`, { method: 'DELETE' });
 }
 
 export async function listWorkflowSteps(runId: string): Promise<WorkflowStepRunRead[]> {
 	return await fetchJson<WorkflowStepRunRead[]>(`/api/workflow-runs/${runId}/steps`);
+}
+
+export type WorkflowInterventionResponse = {
+	run: WorkflowRunRead;
+	step: WorkflowStepRunRead;
+	assistant_message: string;
+	state_patch: Record<string, unknown>;
+};
+
+export async function applyWorkflowIntervention(
+	runId: string,
+	payload: { instruction: string; step_id?: string | null },
+): Promise<WorkflowInterventionResponse> {
+	return await fetchJson<WorkflowInterventionResponse>(`/api/workflow-runs/${runId}/interventions`, {
+		method: 'POST',
+		body: JSON.stringify({ instruction: payload.instruction, step_id: payload.step_id ?? null }),
+	});
 }
 
 export type WorkflowNextResponse = {

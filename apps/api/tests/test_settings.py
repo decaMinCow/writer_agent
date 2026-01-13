@@ -65,3 +65,38 @@ async def test_patch_output_spec_can_clear_overrides(client):
     assert cleared.status_code == 200
     assert "script_format" not in cleared.json()["content"]["output_spec"]
 
+
+async def test_llm_provider_settings_get_and_patch_and_clear(client):
+    got = await client.get("/api/settings/llm-provider")
+    assert got.status_code == 200
+    body = got.json()
+    assert "api_key" not in body
+    assert body["api_key_configured"] is False
+    assert body["model"]  # has env default
+    assert body["embeddings_model"]
+    assert isinstance(body["timeout_s"], (int, float))
+
+    patched = await client.patch(
+        "/api/settings/llm-provider",
+        json={
+            "base_url": "https://example.com/v1",
+            "model": "gpt-test",
+            "embeddings_model": "text-embedding-test",
+            "timeout_s": 12,
+            "api_key": "sk-test",
+        },
+    )
+    assert patched.status_code == 200
+    patched_body = patched.json()
+    assert "api_key" not in patched_body
+    assert patched_body["api_key_configured"] is True
+    assert patched_body["base_url"] == "https://example.com/v1"
+    assert patched_body["model"] == "gpt-test"
+    assert patched_body["embeddings_model"] == "text-embedding-test"
+    assert patched_body["timeout_s"] == 12
+
+    cleared = await client.patch("/api/settings/llm-provider", json={"api_key": None})
+    assert cleared.status_code == 200
+    cleared_body = cleared.json()
+    assert "api_key" not in cleared_body
+    assert cleared_body["api_key_configured"] is False

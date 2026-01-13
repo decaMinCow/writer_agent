@@ -4,17 +4,28 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.db.models import AppSetting
 from app.schemas.briefs import ScriptFormat
 from app.services.json_utils import deep_merge
 
 OUTPUT_SPEC_DEFAULTS_KEY = "output_spec_defaults"
+LLM_PROVIDER_SETTINGS_KEY = "llm_provider_settings"
 
 SERVER_OUTPUT_SPEC_DEFAULTS: dict[str, Any] = {
     "language": "zh-CN",
     "script_format": ScriptFormat.screenplay_int_ext.value,
     "script_format_notes": None,
 }
+
+
+def _normalize_optional_str(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    cleaned = value.strip()
+    return cleaned or None
 
 
 async def get_output_spec_defaults(*, session: AsyncSession) -> dict[str, Any]:
@@ -55,3 +66,101 @@ async def patch_output_spec_defaults(
     await session.commit()
     return await get_output_spec_defaults(session=session)
 
+
+async def get_llm_provider_settings_raw(*, session: AsyncSession) -> dict[str, Any]:
+    setting = await session.get(AppSetting, LLM_PROVIDER_SETTINGS_KEY)
+    return dict(setting.value or {}) if setting else {}
+
+
+def resolve_llm_provider_effective_config(
+    *,
+    stored: dict[str, Any],
+    env_settings: Settings,
+) -> dict[str, Any]:
+    stored_base_url = _normalize_optional_str(stored.get("base_url"))
+    stored_model = _normalize_optional_str(stored.get("model"))
+    stored_embeddings_model = _normalize_optional_str(stored.get("embeddings_model"))
+
+    base_url = stored_base_url or env_settings.resolved_openai_base_url()
+    model = stored_model or env_settings.openai_model
+    embeddings_model = stored_embeddings_model or env_settings.openai_embeddings_model
+
+    timeout_raw = stored.get("timeout_s")
+    try:
+        timeout_s = float(timeout_raw) if timeout_raw is not None else float(env_settings.openai_timeout_s)
+    except (TypeError, ValueError):
+        timeout_s = float(env_settings.openai_timeout_s)
+
+    api_key = _normalize_optional_str(stored.get("api_key")) or (
+        _normalize_optional_str(env_settings.openai_api_key) if env_settings.openai_api_key else None
+    )
+
+    return {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "embeddings_model": embeddings_model,
+        "timeout_s": timeout_s,
+    }
+
+
+async def get_llm_provider_settings(
+    *,
+    session: AsyncSession,
+    env_settings: Settings,
+) -> dict[str, Any]:
+    stored = await get_llm_provider_settings_raw(session=session)
+    effective = resolve_llm_provider_effective_config(stored=stored, env_settings=env_settings)
+    api_key_configured = bool(_normalize_optional_str(stored.get("api_key")))
+
+    return {
+        "base_url": effective.get("base_url"),
+        "model": effective.get("model"),
+        "embeddings_model": effective.get("embeddings_model"),
+        "timeout_s": effective.get("timeout_s"),
+        "api_key_configured": api_key_configured,
+    }
+
+
+async def patch_llm_provider_settings(
+    *,
+    session: AsyncSession,
+    patch: dict[str, Any],
+) -> None:
+    setting = await session.get(AppSetting, LLM_PROVIDER_SETTINGS_KEY)
+    stored: dict[str, Any] = dict(setting.value or {}) if setting else {}
+
+    for key, value in patch.items():
+        if key == "api_key":
+            if value is None:
+                stored.pop("api_key", None)
+            else:
+                cleaned = _normalize_optional_str(value)
+                if cleaned is None:
+                    stored.pop("api_key", None)
+                else:
+                    stored["api_key"] = cleaned
+            continue
+
+        if value is None:
+            stored.pop(key, None)
+            continue
+
+        if key in {"base_url", "model", "embeddings_model"}:
+            cleaned = _normalize_optional_str(value)
+            if cleaned is None:
+                stored.pop(key, None)
+            else:
+                stored[key] = cleaned
+        elif key == "timeout_s":
+            stored[key] = float(value)
+        else:
+            stored[key] = value
+
+    if setting is None:
+        setting = AppSetting(key=LLM_PROVIDER_SETTINGS_KEY, value=stored)
+        session.add(setting)
+    else:
+        setting.value = stored
+
+    await session.commit()

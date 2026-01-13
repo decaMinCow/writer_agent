@@ -11,6 +11,32 @@ from app.schemas.brief_messages import BriefBuilderResult
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
 
 
+async def parse_brief_builder_output(
+    *,
+    llm: LLMClient,
+    raw_output: str,
+    max_attempts: int = 2,
+) -> BriefBuilderResult:
+    try:
+        payload = extract_json_object(raw_output)
+        return BriefBuilderResult.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        if max_attempts <= 1:
+            raise RuntimeError("brief_builder_invalid_output") from exc
+
+        repair_system = load_prompt("json_repair_system.md")
+        repair_user = render_prompt(
+            load_prompt("json_repair_user.md"),
+            {"INVALID_OUTPUT": raw_output or str(exc)},
+        )
+        repaired = await llm.complete(system_prompt=repair_system, user_prompt=repair_user)
+        try:
+            payload = extract_json_object(repaired)
+            return BriefBuilderResult.model_validate(payload)
+        except (json.JSONDecodeError, ValidationError) as repair_exc:
+            raise RuntimeError("brief_builder_invalid_output") from repair_exc
+
+
 async def build_brief_result(
     *,
     llm: LLMClient,
@@ -30,21 +56,4 @@ async def build_brief_result(
     )
 
     raw_output = await llm.complete(system_prompt=system_prompt, user_prompt=user_prompt)
-    try:
-        payload = extract_json_object(raw_output)
-        return BriefBuilderResult.model_validate(payload)
-    except (json.JSONDecodeError, ValidationError) as exc:
-        if max_attempts <= 1:
-            raise RuntimeError("brief_builder_invalid_output") from exc
-
-        repair_system = load_prompt("json_repair_system.md")
-        repair_user = render_prompt(
-            load_prompt("json_repair_user.md"),
-            {"INVALID_OUTPUT": raw_output or str(exc)},
-        )
-        repaired = await llm.complete(system_prompt=repair_system, user_prompt=repair_user)
-        try:
-            payload = extract_json_object(repaired)
-            return BriefBuilderResult.model_validate(payload)
-        except (json.JSONDecodeError, ValidationError) as repair_exc:
-            raise RuntimeError("brief_builder_invalid_output") from repair_exc
+    return await parse_brief_builder_output(llm=llm, raw_output=raw_output, max_attempts=max_attempts)

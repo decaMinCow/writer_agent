@@ -15,6 +15,7 @@ from app.schemas.artifacts import (
     ArtifactVersionRead,
     ArtifactVersionRewriteRequest,
 )
+from app.services.llm_provider import resolve_embeddings_client, resolve_llm_client
 from app.services.memory_store import index_artifact_version
 from app.services.targeted_rewrite import rewrite_selected_text
 
@@ -77,7 +78,7 @@ async def create_artifact_version(
 
     brief_snapshot_id = payload.brief_snapshot_id
     if brief_snapshot_id:
-        embeddings = getattr(request.app.state, "embeddings_client", None)
+        embeddings = await resolve_embeddings_client(session=session, app=request.app)
         if embeddings is not None:
             try:
                 await index_artifact_version(
@@ -142,7 +143,7 @@ async def rewrite_artifact_version(
     if not artifact:
         raise HTTPException(status_code=404, detail="artifact_not_found")
 
-    llm = getattr(request.app.state, "llm_client", None)
+    llm = await resolve_llm_client(session=session, app=request.app)
     if llm is None:
         raise HTTPException(status_code=400, detail="openai_not_configured")
 
@@ -211,7 +212,7 @@ async def rewrite_artifact_version(
     response = ArtifactVersionRead.model_validate(version)
 
     if base_version.brief_snapshot_id:
-        embeddings = getattr(request.app.state, "embeddings_client", None)
+        embeddings = await resolve_embeddings_client(session=session, app=request.app)
         if embeddings is not None:
             try:
                 await index_artifact_version(

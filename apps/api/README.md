@@ -3,10 +3,11 @@
 ## Run locally
 ```bash
 cp .env.example .env
-# set OPENAI_API_KEY in .env to enable brief chat updates
+# Optional: set OPENAI_API_KEY / OPENAI_BASE_URL in .env (env fallback),
+# or configure provider settings in the web UI panel “模型提供商（OpenAI 兼容）”.
 uv sync
 uv run alembic upgrade head
-uv run uvicorn app.main:app --reload --port 8000
+uv run uvicorn app.main:app --reload --port 9761
 ```
 
 ## Run tests

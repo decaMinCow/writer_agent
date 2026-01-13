@@ -1,10 +1,12 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import {
 		applyPropagation,
 		createWorkflowRun,
 		createBrief,
 		createBriefSnapshot,
+		deleteBrief,
+		deleteBriefSnapshot,
 		previewPropagation,
 		repairPropagation,
 		createOpenThread,
@@ -12,6 +14,7 @@
 		forkWorkflowRun,
 		getArtifactVersion,
 		getGlobalOutputSpecDefaults,
+		getLlmProviderSettings,
 		getKnowledgeGraph,
 		createArtifactVersion,
 		createGlossaryEntry,
@@ -30,7 +33,8 @@
 		updateOpenThread,
 		patchBriefOutputSpecOverrides,
 		patchGlobalOutputSpecDefaults,
-		postBriefMessage,
+		patchLlmProviderSettings,
+		streamBriefMessage,
 		rebuildKnowledgeGraph,
 		executeWorkflowNext,
 		runStoryLint,
@@ -38,11 +42,14 @@
 		stopWorkflowAutorun,
 		workflowRunEventsUrl,
 		listWorkflowRuns,
+		deleteWorkflowRun,
 		listWorkflowSteps,
 		pauseWorkflowRun,
 		patchWorkflowRun,
+		applyWorkflowIntervention,
 		resumeWorkflowRun,
 		rewriteArtifactVersion,
+		type WorkflowInterventionResponse,
 		type ArtifactRead,
 		type ArtifactImpactRead,
 		type ArtifactVersionRead,
@@ -58,6 +65,7 @@
 		type PropagationPreviewResponse,
 		type GlossaryEntryRead,
 		type OutputSpecDefaults,
+		type LlmProviderSettings,
 		type ScriptFormat,
 		type WorkflowRunRead,
 		type WorkflowStepRunRead,
@@ -74,12 +82,21 @@
 	let messageDraft = '';
 	let selectedMode: GapReport['mode'] = 'novel';
 	let sendingMessage = false;
+	let messageTextarea: HTMLTextAreaElement | null = null;
 
 	let globalOutputSpec: OutputSpecDefaults | null = null;
 	let globalLanguageDraft = 'zh-CN';
 	let globalScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
 	let globalScriptNotesDraft = '';
 	let savingGlobalPrefs = false;
+
+	let llmProviderSettings: LlmProviderSettings | null = null;
+	let providerBaseUrlDraft = '';
+	let providerModelDraft = '';
+	let providerEmbeddingsModelDraft = '';
+	let providerTimeoutDraft = '60';
+	let providerApiKeyDraft = '';
+	let savingProviderSettings = false;
 
 	let newBriefTitle = '';
 	let creatingBrief = false;
@@ -93,8 +110,11 @@
 	let briefScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
 	let briefScriptNotesDraft = '';
 	let savingBriefPrefs = false;
+	let showBriefJson = false;
+	let showSnapshotJson = false;
 
 	let workflowRuns: WorkflowRunRead[] = [];
+	let visibleWorkflowRuns: WorkflowRunRead[] = [];
 	let selectedRun: WorkflowRunRead | null = null;
 	let workflowSteps: WorkflowStepRunRead[] = [];
 	let selectedStep: WorkflowStepRunRead | null = null;
@@ -106,6 +126,12 @@
 	let runStateDraft = '';
 	let savingRunState = false;
 	let forkingRun = false;
+
+	let interventionDraft = '';
+	let sendingIntervention = false;
+	let interventionTextarea: HTMLTextAreaElement | null = null;
+	let interventionSteps: WorkflowStepRunRead[] = [];
+	let lastFailedStep: WorkflowStepRunRead | null = null;
 
 	let artifacts: ArtifactRead[] = [];
 	let selectedArtifact: ArtifactRead | null = null;
@@ -152,6 +178,26 @@
 	let runningLint = false;
 	let lintUseLlm = true;
 
+	function tempId(prefix: string): string {
+		const uuid =
+			typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+				? crypto.randomUUID()
+				: String(Date.now() + Math.random());
+		return `${prefix}-${uuid}`;
+	}
+
+	function autosizeMessageTextarea() {
+		if (!messageTextarea) return;
+		messageTextarea.style.height = 'auto';
+		messageTextarea.style.height = `${messageTextarea.scrollHeight}px`;
+	}
+
+	function autosizeInterventionTextarea() {
+		if (!interventionTextarea) return;
+		interventionTextarea.style.height = 'auto';
+		interventionTextarea.style.height = `${interventionTextarea.scrollHeight}px`;
+	}
+
 	function clearPropagation() {
 		propagationPreview = null;
 		propagationBaseVersionId = null;
@@ -197,6 +243,18 @@
 		globalLanguageDraft = globalOutputSpec.language;
 		globalScriptFormatDraft = globalOutputSpec.script_format;
 		globalScriptNotesDraft = globalOutputSpec.script_format_notes ?? '';
+	}
+
+	function syncProviderDrafts() {
+		if (!llmProviderSettings) return;
+		providerBaseUrlDraft = llmProviderSettings.base_url ?? '';
+		providerModelDraft = llmProviderSettings.model ?? '';
+		providerEmbeddingsModelDraft = llmProviderSettings.embeddings_model ?? '';
+		providerTimeoutDraft =
+			llmProviderSettings.timeout_s !== undefined && llmProviderSettings.timeout_s !== null
+				? String(llmProviderSettings.timeout_s)
+				: '60';
+		providerApiKeyDraft = '';
 	}
 
 	function syncBriefOverrideDrafts() {
@@ -248,10 +306,69 @@
 		}
 	}
 
+	async function refreshProviderSettings() {
+		error = null;
+		try {
+			llmProviderSettings = await getLlmProviderSettings();
+			syncProviderDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function saveProviderSettings() {
+		error = null;
+		savingProviderSettings = true;
+		try {
+			const payload: {
+				base_url?: string | null;
+				model?: string | null;
+				embeddings_model?: string | null;
+				timeout_s?: number | null;
+				api_key?: string | null;
+			} = {
+				base_url: providerBaseUrlDraft.trim() || null,
+				model: providerModelDraft.trim() || null,
+				embeddings_model: providerEmbeddingsModelDraft.trim() || null,
+			};
+
+			const timeout = Number(providerTimeoutDraft);
+			payload.timeout_s = Number.isFinite(timeout) && timeout > 0 ? timeout : null;
+
+			const key = providerApiKeyDraft.trim();
+			if (key) {
+				payload.api_key = key;
+			}
+
+			llmProviderSettings = await patchLlmProviderSettings(payload);
+			syncProviderDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingProviderSettings = false;
+		}
+	}
+
+	async function clearProviderApiKey() {
+		if (!llmProviderSettings?.api_key_configured) return;
+		error = null;
+		savingProviderSettings = true;
+		try {
+			llmProviderSettings = await patchLlmProviderSettings({ api_key: null });
+			syncProviderDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingProviderSettings = false;
+		}
+	}
+
 	async function selectBrief(brief: BriefRead) {
 		closeRunEvents();
 		autoRunning = false;
 		selectedBrief = brief;
+		showBriefJson = false;
+		showSnapshotJson = false;
 		selectedRun = null;
 		selectedArtifact = null;
 		selectedSnapshot = null;
@@ -284,23 +401,12 @@
 		autoRunning = false;
 		selectedRun = run;
 		runStateDraft = JSON.stringify(run.state, null, 2);
-		selectedBrief = null;
 		selectedArtifact = null;
-		selectedSnapshot = null;
 		selectedStep = null;
-		briefSnapshots = [];
-		briefMessages = [];
-		gapReport = null;
 		artifactVersions = [];
 		selectedArtifactVersion = null;
 		artifactEditorDraft = '';
 		clearPropagation();
-		knowledgeGraph = null;
-		lintIssues = [];
-		openThreads = [];
-		selectedOpenThread = null;
-		openThreadRefs = [];
-		glossaryEntries = [];
 		try {
 			workflowSteps = await listWorkflowSteps(run.id);
 			subscribeToRunEvents(run.id);
@@ -683,7 +789,15 @@
 	}
 
 	async function selectSnapshot(snap: BriefSnapshotRead) {
+		if (selectedSnapshot?.id !== snap.id) {
+			closeRunEvents();
+			autoRunning = false;
+			selectedRun = null;
+			workflowSteps = [];
+			selectedStep = null;
+		}
 		selectedSnapshot = snap;
+		showSnapshotJson = false;
 		await refreshAnalysis();
 	}
 
@@ -713,10 +827,120 @@
 			newSnapshotLabel = '';
 			briefSnapshots = await listBriefSnapshots(selectedBrief.id);
 			selectedSnapshot = snap;
+			showSnapshotJson = false;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			creatingSnapshot = false;
+		}
+	}
+
+	async function deleteBriefFromUi(brief: BriefRead) {
+		const title = brief.title ?? '（未命名）';
+		if (!confirm(`确定删除 Brief「${title}」及其所有版本 / runs / 产物吗？此操作不可撤销。`)) return;
+
+		error = null;
+		try {
+			await deleteBrief(brief.id);
+			if (selectedBrief?.id === brief.id) {
+				closeRunEvents();
+				autoRunning = false;
+				selectedBrief = null;
+				selectedSnapshot = null;
+				selectedRun = null;
+				selectedStep = null;
+				briefSnapshots = [];
+				briefMessages = [];
+				gapReport = null;
+				workflowSteps = [];
+				clearPropagation();
+				knowledgeGraph = null;
+				lintIssues = [];
+				openThreads = [];
+				selectedOpenThread = null;
+				openThreadRefs = [];
+				glossaryEntries = [];
+			}
+			selectedArtifact = null;
+			artifactVersions = [];
+			selectedArtifactVersion = null;
+			artifactEditorDraft = '';
+			await refreshAll();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function deleteSnapshotFromUi(snap: BriefSnapshotRead) {
+		const label = snap.label ?? '（未命名）';
+		if (!confirm(`确定删除版本「${label}」及其 runs / 产物吗？此操作不可撤销。`)) return;
+
+		error = null;
+		try {
+			await deleteBriefSnapshot(snap.id);
+
+			if (selectedSnapshot?.id === snap.id) {
+				closeRunEvents();
+				autoRunning = false;
+				selectedSnapshot = null;
+				selectedRun = null;
+				selectedStep = null;
+				workflowSteps = [];
+				clearPropagation();
+				knowledgeGraph = null;
+				lintIssues = [];
+				openThreads = [];
+				selectedOpenThread = null;
+				openThreadRefs = [];
+				glossaryEntries = [];
+			}
+			if (selectedRun?.brief_snapshot_id === snap.id) {
+				closeRunEvents();
+				autoRunning = false;
+				selectedRun = null;
+				selectedStep = null;
+				workflowSteps = [];
+			}
+			if (selectedArtifactVersion?.brief_snapshot_id === snap.id) {
+				selectedArtifact = null;
+				artifactVersions = [];
+				selectedArtifactVersion = null;
+				artifactEditorDraft = '';
+				clearPropagation();
+			}
+
+			await refreshAll();
+			if (selectedBrief?.id === snap.brief_id) {
+				briefSnapshots = await listBriefSnapshots(selectedBrief.id);
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function deleteRunFromUi(run: WorkflowRunRead) {
+		if (!confirm(`确定删除该 workflow run 及其 step 记录/产物吗？此操作不可撤销。`)) return;
+
+		error = null;
+		try {
+			await deleteWorkflowRun(run.id);
+			if (selectedRun?.id === run.id) {
+				closeRunEvents();
+				autoRunning = false;
+				selectedRun = null;
+				selectedStep = null;
+				workflowSteps = [];
+			}
+			if (selectedArtifactVersion?.workflow_run_id === run.id) {
+				selectedArtifact = null;
+				artifactVersions = [];
+				selectedArtifactVersion = null;
+				artifactEditorDraft = '';
+				clearPropagation();
+			}
+			await refreshAll();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
@@ -773,15 +997,57 @@
 
 		error = null;
 		sendingMessage = true;
-		try {
-			const resp = await postBriefMessage(selectedBrief.id, {
+		const briefId = selectedBrief.id;
+		const now = new Date().toISOString();
+		const userTempId = tempId('temp-user');
+		const assistantTempId = tempId('temp-assistant');
+		briefMessages = [
+			...briefMessages,
+			{
+				id: userTempId,
+				brief_id: briefId,
+				role: 'user',
 				content_text: text,
-				mode: selectedMode,
-			});
-			selectedBrief = resp.brief;
-			gapReport = resp.gap_report;
-			briefMessages = resp.messages;
-			messageDraft = '';
+				metadata: {},
+				created_at: now,
+			},
+			{
+				id: assistantTempId,
+				brief_id: briefId,
+				role: 'assistant',
+				content_text: '…',
+				metadata: { streaming: true },
+				created_at: now,
+			},
+		];
+		messageDraft = '';
+		await tick();
+		autosizeMessageTextarea();
+		try {
+			await streamBriefMessage(
+				briefId,
+				{ content_text: text, mode: selectedMode },
+				{
+					onAssistantDelta: (append) => {
+						briefMessages = briefMessages.map((m) =>
+							m.id === assistantTempId
+								? {
+										...m,
+										content_text: m.content_text === '…' ? append : m.content_text + append,
+									}
+								: m,
+						);
+					},
+					onFinal: (resp) => {
+						selectedBrief = resp.brief;
+						gapReport = resp.gap_report;
+						briefMessages = resp.messages;
+					},
+					onError: (detail) => {
+						error = detail;
+					},
+				},
+			);
 			await refreshAll();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -843,6 +1109,39 @@
 		} finally {
 			forkingRun = false;
 		}
+	}
+
+	async function sendIntervention() {
+		if (!selectedRun) return;
+		const instruction = interventionDraft.trim();
+		if (!instruction) return;
+
+		error = null;
+		sendingIntervention = true;
+		try {
+			const resp: WorkflowInterventionResponse = await applyWorkflowIntervention(selectedRun.id, {
+				instruction,
+				step_id: selectedStep?.id ?? null,
+			});
+			selectedRun = resp.run;
+			runStateDraft = JSON.stringify(resp.run.state, null, 2);
+			workflowSteps = await listWorkflowSteps(resp.run.id);
+			selectedStep = resp.step;
+			interventionDraft = '';
+			await tick();
+			autosizeInterventionTextarea();
+			await refreshAll();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			sendingIntervention = false;
+		}
+	}
+
+	async function clearInterventionDraft() {
+		interventionDraft = '';
+		await tick();
+		autosizeInterventionTextarea();
 	}
 
 	async function runNext() {
@@ -997,9 +1296,100 @@
 		return parts.join(' · ');
 	}
 
+	function runDisplayName(run: WorkflowRunRead): string {
+		const kindLabel =
+			run.kind === 'novel' ? '小说' : run.kind === 'script' ? '剧本' : run.kind === 'novel_to_script' ? '小说→剧本' : run.kind;
+
+		const cursor = (run.state as any)?.cursor as any;
+		const phase = cursor && typeof cursor === 'object' ? String(cursor.phase ?? '') : '';
+		const chapterIndex = cursor && typeof cursor === 'object' ? Number(cursor.chapter_index ?? 0) : 0;
+		const sceneIndex = cursor && typeof cursor === 'object' ? Number(cursor.scene_index ?? 0) : 0;
+
+		if (!phase) return `${kindLabel} · 未开始`;
+
+		if (run.kind === 'novel') {
+			if (phase === 'novel_outline') return `${kindLabel} · 大纲`;
+			if (phase === 'novel_beats') return `${kindLabel} · 分章`;
+			if (phase === 'novel_chapter_draft') return `${kindLabel} · 第${chapterIndex || 1}章 · 草稿`;
+			if (phase === 'novel_chapter_critic') return `${kindLabel} · 第${chapterIndex || 1}章 · 审校`;
+			if (phase === 'novel_chapter_fix') return `${kindLabel} · 第${chapterIndex || 1}章 · 修复`;
+			if (phase === 'novel_chapter_commit') return `${kindLabel} · 第${chapterIndex || 1}章 · 提交`;
+			if (phase === 'done') return `${kindLabel} · 完成`;
+			return `${kindLabel} · ${phase}`;
+		}
+
+		if (run.kind === 'script') {
+			if (phase === 'script_scene_list') return `${kindLabel} · 场景列表`;
+			if (phase === 'script_scene_draft') return `${kindLabel} · 第${sceneIndex || 1}场 · 草稿`;
+			if (phase === 'script_scene_critic') return `${kindLabel} · 第${sceneIndex || 1}场 · 审校`;
+			if (phase === 'script_scene_fix') return `${kindLabel} · 第${sceneIndex || 1}场 · 修复`;
+			if (phase === 'script_scene_commit') return `${kindLabel} · 第${sceneIndex || 1}场 · 提交`;
+			if (phase === 'done') return `${kindLabel} · 完成`;
+			return `${kindLabel} · ${phase}`;
+		}
+
+		if (run.kind === 'novel_to_script') {
+			if (phase === 'nts_scene_list') return `${kindLabel} · 场景列表`;
+			if (phase === 'nts_scene_draft') return `${kindLabel} · 第${sceneIndex || 1}场 · 草稿`;
+			if (phase === 'nts_scene_critic') return `${kindLabel} · 第${sceneIndex || 1}场 · 审校`;
+			if (phase === 'nts_scene_fix') return `${kindLabel} · 第${sceneIndex || 1}场 · 修复`;
+			if (phase === 'nts_scene_commit') return `${kindLabel} · 第${sceneIndex || 1}场 · 提交`;
+			if (phase === 'done') return `${kindLabel} · 完成`;
+			return `${kindLabel} · ${phase}`;
+		}
+
+		return `${kindLabel} · ${phase}`;
+	}
+
+	function translateWorkflowErrorDetail(detail: string): string {
+		const mapping: Record<string, string> = {
+			hard_check_failed: '硬一致性检查失败',
+			max_fix_attempts_exceeded: '修复次数超过上限',
+			novel_source_missing: '缺少小说来源（无法转写）',
+			step_failed: '步骤执行失败',
+		};
+		return mapping[detail] ?? detail;
+	}
+
+	function runErrorSummary(err: Record<string, unknown> | null): string {
+		if (!err) return '';
+		const detail = typeof (err as any).detail === 'string' ? ((err as any).detail as string) : '';
+		const detailLabel = detail ? translateWorkflowErrorDetail(detail) : '';
+		const hardErrors = Array.isArray((err as any).hard_errors) ? ((err as any).hard_errors as unknown[]) : null;
+		const hardText = hardErrors && hardErrors.length ? hardErrors.map(String).join(', ') : '';
+		const errorType = typeof (err as any).error_type === 'string' ? ((err as any).error_type as string) : '';
+		const message = typeof (err as any).error === 'string' ? ((err as any).error as string) : '';
+
+		const parts = [detailLabel || detail, errorType ? `(${errorType})` : '', hardText || message].filter(Boolean);
+		return parts.join(' ');
+	}
+
+	$: {
+		const snapshotId = selectedSnapshot?.id;
+		visibleWorkflowRuns = snapshotId
+			? workflowRuns.filter((r) => r.brief_snapshot_id === snapshotId)
+			: [];
+	}
+
+	$: {
+		interventionSteps = workflowSteps
+			.filter((step) => step.step_name === 'intervention')
+			.slice()
+			.sort((a, b) => (b.step_index ?? 0) - (a.step_index ?? 0));
+	}
+
+	$: {
+		lastFailedStep =
+			workflowSteps
+				.filter((step) => step.status === 'failed')
+				.slice()
+				.sort((a, b) => (b.step_index ?? 0) - (a.step_index ?? 0))[0] ?? null;
+	}
+
 	onMount(async () => {
 		await refreshAll();
 		await refreshSettings();
+		await refreshProviderSettings();
 	});
 
 	onDestroy(() => {
@@ -1007,8 +1397,8 @@
 	});
 </script>
 
-<div class="h-screen bg-zinc-950 text-zinc-100">
-	<div class="flex h-full flex-col">
+<div class="h-screen overflow-hidden bg-zinc-950 text-zinc-100">
+	<div class="flex h-full min-h-0 flex-col">
 		<header class="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
 			<div class="text-sm font-semibold">writer_agent2 · IDE (foundation)</div>
 			<div class="flex items-center gap-2">
@@ -1027,13 +1417,13 @@
 			</div>
 		{/if}
 
-		<div class="grid flex-1 grid-cols-[320px_1fr_360px]">
+		<div class="grid min-h-0 flex-1 grid-cols-[320px_1fr_360px]">
 			<!-- Left: Chat -->
-			<section class="flex flex-col border-r border-zinc-800">
+			<section class="flex min-h-0 flex-col border-r border-zinc-800">
 				<div class="border-b border-zinc-800 px-4 py-3 text-xs font-semibold text-zinc-300">
 					对话
 				</div>
-				<div class="flex-1 space-y-3 overflow-auto p-4 text-sm text-zinc-300">
+				<div class="min-h-0 flex-1 space-y-3 overflow-auto p-4 text-sm text-zinc-300">
 					{#if selectedBrief}
 						{#each briefMessages as m (m.id)}
 							<div class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -1051,7 +1441,7 @@
 					{/if}
 				</div>
 				<div class="border-t border-zinc-800 p-3">
-					<div class="flex gap-2">
+					<div class="flex items-end gap-2">
 						<select
 							class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-200"
 							bind:value={selectedMode}
@@ -1061,13 +1451,21 @@
 							<option value="script">剧本</option>
 							<option value="novel_to_script">小说→剧本</option>
 						</select>
-						<input
-							class="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-600"
+						<textarea
+							class="max-h-40 flex-1 resize-none overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm leading-5 outline-none placeholder:text-zinc-600"
 							placeholder={selectedBrief ? '输入想法…' : '请选择一个 Brief…'}
+							rows="1"
+							bind:this={messageTextarea}
 							bind:value={messageDraft}
 							disabled={!selectedBrief || sendingMessage}
-							onkeydown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-						/>
+							oninput={autosizeMessageTextarea}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' && !e.shiftKey) {
+									e.preventDefault();
+									sendMessage();
+								}
+							}}
+						></textarea>
 						<button
 							class="rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
 							onclick={sendMessage}
@@ -1080,11 +1478,11 @@
 			</section>
 
 			<!-- Middle: Workflow -->
-			<section class="flex flex-col border-r border-zinc-800">
+			<section class="flex min-h-0 flex-col border-r border-zinc-800">
 				<div class="border-b border-zinc-800 px-4 py-3 text-xs font-semibold text-zinc-300">
 					工作流
 				</div>
-				<div class="flex-1 overflow-auto p-4">
+				<div class="min-h-0 flex-1 overflow-auto p-4">
 					{#if selectedArtifact}
 						<div class="rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 flex items-center justify-between gap-2">
@@ -1271,28 +1669,51 @@
 						{/if}
 
 						<div class="mb-3 text-xs font-semibold text-zinc-400">Workflow Runs</div>
-						<div class="space-y-1">
-							{#each workflowRuns as run (run.id)}
-								<button
-									class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
-									onclick={() => selectRun(run)}
-								>
-									<span class="truncate">{run.kind}</span>
-									<span class="ml-2 rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200"
-										>{run.status}</span
-									>
-								</button>
-							{/each}
-							{#if workflowRuns.length === 0}
-								<div class="text-xs text-zinc-500">暂无 runs（可先用 API 创建）</div>
-							{/if}
-						</div>
+						{#if selectedSnapshot}
+							<div class="space-y-1">
+								{#each visibleWorkflowRuns as run (run.id)}
+									<div class="flex gap-2">
+										<button
+											class="flex flex-1 items-start justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
+											class:border-emerald-700={selectedRun?.id === run.id}
+											onclick={() => selectRun(run)}
+										>
+											<div class="min-w-0 flex-1">
+												<div class="flex items-center justify-between gap-2">
+													<span class="truncate">{runDisplayName(run)}</span>
+													<span
+														class="ml-2 rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200"
+														>{run.status}</span
+													>
+												</div>
+												{#if run.status === 'failed'}
+													<div class="mt-1 truncate text-[10px] text-red-200/80">
+														{runErrorSummary(run.error) || '（无错误详情）'}
+													</div>
+												{/if}
+											</div>
+										</button>
+										<button
+											class="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200 hover:bg-red-950/60"
+											onclick={() => deleteRunFromUi(run)}
+										>
+											删除
+										</button>
+									</div>
+								{/each}
+								{#if visibleWorkflowRuns.length === 0}
+									<div class="text-xs text-zinc-500">该版本暂无 runs</div>
+								{/if}
+							</div>
+						{:else}
+							<div class="text-xs text-zinc-500">请先在右侧选择一个 Snapshot 才能查看 runs。</div>
+						{/if}
 
 						{#if selectedRun}
 							<div class="mt-6">
 								<div class="mb-2 flex items-center justify-between gap-2">
 									<div class="text-xs font-semibold text-zinc-400">
-										Steps · {selectedRun.kind} · {selectedRun.status}
+										Steps · {runDisplayName(selectedRun)} · {selectedRun.status}
 									</div>
 									<div class="text-[11px] text-zinc-500">{cursorSummary(selectedRun)}</div>
 								</div>
@@ -1310,9 +1731,9 @@
 										onclick={runNext}
 										disabled={stepping ||
 											autoRunning ||
-											!['queued', 'running'].includes(selectedRun.status)}
+											!['queued', 'running', 'failed'].includes(selectedRun.status)}
 									>
-										下一步
+										{selectedRun.status === 'failed' ? '重试' : '下一步'}
 									</button>
 									<button
 										class="rounded-md bg-zinc-800 px-3 py-1.5 text-xs hover:bg-zinc-700 disabled:opacity-50"
@@ -1339,12 +1760,49 @@
 										<button
 											class="rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
 											onclick={startAuto}
-											disabled={stepping || !['queued', 'running'].includes(selectedRun.status)}
+											disabled={stepping || !['queued', 'running', 'failed'].includes(selectedRun.status)}
 										>
-											自动
+											{selectedRun.status === 'failed' ? '重试自动' : '自动'}
 										</button>
 									{/if}
 								</div>
+
+								{#if selectedRun.status === 'failed'}
+									<div class="mb-3 rounded-md border border-red-900/60 bg-red-950/30 p-3">
+										<div class="mb-2 flex items-center justify-between gap-2">
+											<div class="text-xs font-semibold text-red-200">运行失败</div>
+											<div class="text-[11px] text-red-200/70">
+												{runErrorSummary(selectedRun.error)}
+											</div>
+										</div>
+
+										{#if selectedRun.error}
+											<pre
+												class="max-h-44 overflow-auto whitespace-pre-wrap rounded border border-red-900/40 bg-red-950/20 p-2 font-mono text-[11px] text-red-100">{JSON.stringify(
+													selectedRun.error,
+													null,
+													2,
+												)}</pre>
+										{:else}
+											<div class="text-[11px] text-red-200/70">（无 error payload）</div>
+										{/if}
+
+										{#if lastFailedStep}
+											<div class="mt-2 text-[11px] text-red-200/80">
+												最近失败 step：{lastFailedStep.step_index ?? ''} · {lastFailedStep.step_name}
+											</div>
+											{#if lastFailedStep.error}
+												<pre
+													class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded border border-red-900/40 bg-red-950/20 p-2 font-mono text-[11px] text-red-100">{lastFailedStep.error}</pre>
+											{/if}
+										{/if}
+
+										<div class="mt-2 text-[10px] text-red-200/70">
+											提示：可点选失败 step 查看 outputs / error；也可用「节点对话干预」修正
+											run.state 后点「重试」。
+										</div>
+									</div>
+								{/if}
 
 								<div class="mb-3 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 									<div class="mb-2 flex items-center justify-between gap-2">
@@ -1373,6 +1831,91 @@
 									></textarea>
 									<div class="mt-2 text-[10px] text-zinc-500">
 										提示：这里只是最小 MVP（直接 PATCH run.state）。编辑错误 JSON 会导致保存失败。
+									</div>
+								</div>
+
+								<div class="mb-3 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+									<div class="mb-2 flex items-center justify-between gap-2">
+										<div class="text-xs font-semibold text-zinc-300">节点对话干预（MVP）</div>
+										<div class="text-[11px] text-zinc-500">
+											目标：
+											{#if selectedStep}
+												{selectedStep.step_index ?? ''} · {selectedStep.step_name}
+											{:else}
+												Run
+											{/if}
+										</div>
+									</div>
+
+									<div class="mb-2 text-[10px] text-zinc-500">
+										提示：先点选一个 step，再输入“怎么改”（例如：把主角名字改为… / 调整章节数为…）。
+										系统会生成 `state_patch` 并合并到 run.state，然后追加一个 `intervention` step。
+									</div>
+
+									{#if interventionSteps.length > 0}
+										<div class="mb-2 max-h-56 overflow-auto rounded-md border border-zinc-800 bg-zinc-950/30 p-2 text-[11px]">
+											{#each interventionSteps as step (step.id)}
+												<div class="mb-2 rounded border border-zinc-800 bg-zinc-950/40 p-2">
+													<div class="mb-1 flex items-center justify-between gap-2">
+														<div class="truncate font-semibold text-zinc-300">
+															{step.step_index ?? ''} · 干预
+														</div>
+														<div class="text-[10px] text-zinc-500">
+															{new Date(step.created_at).toLocaleString()}
+														</div>
+													</div>
+													<div class="mb-1 text-[10px] text-zinc-500">
+														目标：
+														{((step.outputs as any)?.target_step_name as string) ?? 'run'}
+													</div>
+													<div class="mb-2">
+														<div class="mb-0.5 text-[10px] text-zinc-500">指令</div>
+														<div class="whitespace-pre-wrap text-zinc-200">
+															{((step.outputs as any)?.instruction as string) ?? ''}
+														</div>
+													</div>
+													<div>
+														<div class="mb-0.5 text-[10px] text-zinc-500">AI</div>
+														<div class="whitespace-pre-wrap text-zinc-200">
+															{((step.outputs as any)?.assistant_message as string) ?? ''}
+														</div>
+													</div>
+												</div>
+											{/each}
+										</div>
+									{/if}
+
+									<textarea
+										class="max-h-40 w-full resize-none overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-sm leading-5 outline-none placeholder:text-zinc-600"
+										placeholder={selectedRun ? '输入干预指令…' : '请选择 Run…'}
+										rows="1"
+										bind:this={interventionTextarea}
+										bind:value={interventionDraft}
+										disabled={!selectedRun || sendingIntervention}
+										oninput={autosizeInterventionTextarea}
+										onkeydown={(e) => {
+											if (e.key === 'Enter' && !e.shiftKey) {
+												e.preventDefault();
+												sendIntervention();
+											}
+										}}
+									></textarea>
+
+									<div class="mt-2 flex gap-2">
+										<button
+											class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+											onclick={sendIntervention}
+											disabled={!selectedRun || sendingIntervention || interventionDraft.trim().length === 0}
+										>
+											{sendingIntervention ? '发送中…' : '发送干预'}
+										</button>
+										<button
+											class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+											onclick={clearInterventionDraft}
+											disabled={sendingIntervention || interventionDraft.length === 0}
+										>
+											清空
+										</button>
 									</div>
 								</div>
 
@@ -1422,7 +1965,11 @@
 												2,
 											)}</pre>
 										{#if selectedStep.error}
-											<div class="mt-2 text-xs text-red-200">error: {selectedStep.error}</div>
+											<div class="mt-2 rounded border border-red-900/60 bg-red-950/30 p-2">
+												<div class="mb-1 text-[10px] font-semibold text-red-200">error</div>
+												<pre
+													class="max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-red-100">{selectedStep.error}</pre>
+											</div>
 										{/if}
 									</div>
 								{/if}
@@ -1433,11 +1980,105 @@
 			</section>
 
 			<!-- Right: Assets -->
-			<section class="flex flex-col">
+			<section class="flex min-h-0 flex-col">
 				<div class="border-b border-zinc-800 px-4 py-3 text-xs font-semibold text-zinc-300">
 					故事资产
 				</div>
-				<div class="flex-1 overflow-auto p-4">
+				<div class="min-h-0 flex-1 overflow-auto p-4">
+					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+						<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
+							<span>模型提供商（OpenAI 兼容）</span>
+							<button
+								class="rounded bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+								onclick={refreshProviderSettings}
+							>
+								刷新
+							</button>
+						</div>
+
+						{#if llmProviderSettings}
+							<div class="mb-2 text-[10px] text-zinc-500">
+								API Key：{llmProviderSettings.api_key_configured ? '已配置' : '未配置'}（不回显）
+							</div>
+
+							<div class="space-y-2 text-xs">
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">Base URL</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										placeholder="https://api.openai.com/v1"
+										bind:value={providerBaseUrlDraft}
+										disabled={savingProviderSettings}
+									/>
+								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">Chat Model</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										placeholder="gpt-4o-mini"
+										bind:value={providerModelDraft}
+										disabled={savingProviderSettings}
+									/>
+								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">Embeddings Model</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										placeholder="text-embedding-3-small"
+										bind:value={providerEmbeddingsModelDraft}
+										disabled={savingProviderSettings}
+									/>
+								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">Timeout（秒）</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										type="number"
+										min="1"
+										step="1"
+										bind:value={providerTimeoutDraft}
+										disabled={savingProviderSettings}
+									/>
+								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">API Key（不回显）</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										type="password"
+										placeholder={llmProviderSettings.api_key_configured
+											? '填入新 key 以更新（留空不变）'
+											: '填入 key 以启用'}
+										bind:value={providerApiKeyDraft}
+										disabled={savingProviderSettings}
+									/>
+								</label>
+
+								<div class="flex gap-2">
+									<button
+										class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+										onclick={saveProviderSettings}
+										disabled={savingProviderSettings}
+									>
+										保存配置
+									</button>
+									<button
+										class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+										onclick={clearProviderApiKey}
+										disabled={savingProviderSettings || !llmProviderSettings.api_key_configured}
+									>
+										清除 Key
+									</button>
+								</div>
+
+								<div class="text-[10px] text-zinc-500">
+									提示：只保存到服务端（单用户本地 DB），GET 不返回 key；留空 key 表示不修改。
+								</div>
+							</div>
+						{:else}
+							<div class="text-xs text-zinc-500">未加载（请检查 API 是否可用）</div>
+						{/if}
+					</div>
+
 					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 						<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
 							<span>全局偏好</span>
@@ -1518,13 +2159,21 @@
 					<div class="mb-3 text-xs font-semibold text-zinc-400">Briefs</div>
 					<div class="space-y-1">
 						{#each briefs as brief (brief.id)}
-							<button
-								class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
-								onclick={() => selectBrief(brief)}
-							>
-								<div class="truncate">{brief.title ?? '（未命名）'}</div>
-								<div class="mt-0.5 truncate text-[10px] text-zinc-500">{brief.id}</div>
-							</button>
+							<div class="flex gap-2">
+								<button
+									class="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
+									onclick={() => selectBrief(brief)}
+								>
+									<div class="truncate">{brief.title ?? '（未命名）'}</div>
+									<div class="mt-0.5 truncate text-[10px] text-zinc-500">{brief.id}</div>
+								</button>
+								<button
+									class="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200 hover:bg-red-950/60"
+									onclick={() => deleteBriefFromUi(brief)}
+								>
+									删除
+								</button>
+							</div>
 						{/each}
 						{#if briefs.length === 0}
 							<div class="text-xs text-zinc-500">暂无 briefs（可先用 API 创建）</div>
@@ -1610,6 +2259,29 @@
 						</div>
 
 						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+							<div class="mb-2 flex items-center justify-between gap-2">
+								<div class="text-xs font-semibold text-zinc-300">Brief 内容（结构化）</div>
+								<button
+									class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+									onclick={() => (showBriefJson = !showBriefJson)}
+								>
+									{showBriefJson ? '收起' : '展开'}
+								</button>
+							</div>
+							<div class="text-[10px] text-zinc-500">
+								提示：对话补全出来的“简介/背景/人物”等都会写进 `brief.content`。
+							</div>
+							{#if showBriefJson}
+								<div class="mt-2 text-[10px] text-zinc-500">
+									最后更新：{new Date(selectedBrief.updated_at).toLocaleString()}
+								</div>
+								<pre
+									class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] text-zinc-300">
+{JSON.stringify({ title: selectedBrief.title, content: selectedBrief.content }, null, 2)}</pre>
+							{/if}
+						</div>
+
+						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 text-xs font-semibold text-zinc-300">创建 Snapshot</div>
 							<div class="flex gap-2">
 								<input
@@ -1636,18 +2308,26 @@
 							<div class="mb-2 text-xs font-semibold text-zinc-400">Snapshots</div>
 							<div class="space-y-1">
 								{#each briefSnapshots as snap (snap.id)}
-									<button
-										class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
-										class:border-emerald-700={selectedSnapshot?.id === snap.id}
-										onclick={() => selectSnapshot(snap)}
-									>
-										<div class="flex items-center justify-between">
-											<div class="truncate">{snap.label ?? '（未命名）'}</div>
-											<div class="text-[10px] text-zinc-500">
-												{new Date(snap.created_at).toLocaleString()}
+									<div class="flex gap-2">
+										<button
+											class="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
+											class:border-emerald-700={selectedSnapshot?.id === snap.id}
+											onclick={() => selectSnapshot(snap)}
+										>
+											<div class="flex items-center justify-between">
+												<div class="truncate">{snap.label ?? '（未命名）'}</div>
+												<div class="text-[10px] text-zinc-500">
+													{new Date(snap.created_at).toLocaleString()}
+												</div>
 											</div>
-										</div>
-									</button>
+										</button>
+										<button
+											class="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200 hover:bg-red-950/60"
+											onclick={() => deleteSnapshotFromUi(snap)}
+										>
+											删除
+										</button>
+									</div>
 								{/each}
 								{#if briefSnapshots.length === 0}
 									<div class="text-xs text-zinc-500">暂无 snapshots</div>
@@ -1656,6 +2336,27 @@
 						</div>
 
 						{#if selectedSnapshot}
+							<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+								<div class="mb-2 flex items-center justify-between gap-2">
+									<div class="text-xs font-semibold text-zinc-300">Snapshot 内容</div>
+									<button
+										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+										onclick={() => (showSnapshotJson = !showSnapshotJson)}
+									>
+										{showSnapshotJson ? '收起' : '展开'}
+									</button>
+								</div>
+								<div class="text-[10px] text-zinc-500">
+									已选：{selectedSnapshot.label ?? '（未命名）'} ·
+									{new Date(selectedSnapshot.created_at).toLocaleString()}
+								</div>
+								{#if showSnapshotJson}
+									<pre
+										class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] text-zinc-300">
+{JSON.stringify(selectedSnapshot.content, null, 2)}</pre>
+								{/if}
+							</div>
+
 							<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 								<div class="mb-2 flex items-center justify-between gap-2">
 									<div class="text-xs font-semibold text-zinc-300">KG / Lint</div>

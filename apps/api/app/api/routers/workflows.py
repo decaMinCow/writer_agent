@@ -6,13 +6,17 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.db.models import BriefSnapshot, RunStatus, WorkflowRun, WorkflowStepRun
 from app.db.session import get_db_session
 from app.schemas.workflow_execution import WorkflowControlResponse, WorkflowNextResponse
+from app.schemas.workflow_interventions import (
+    WorkflowInterventionRequest,
+    WorkflowInterventionResponse,
+)
 from app.schemas.workflows import (
     WorkflowRunCreate,
     WorkflowRunForkRequest,
@@ -22,7 +26,11 @@ from app.schemas.workflows import (
     WorkflowStepRunPatch,
     WorkflowStepRunRead,
 )
+from app.services import cascade_delete
+from app.services.json_utils import deep_merge
+from app.services.llm_provider import resolve_llm_and_embeddings, resolve_llm_client
 from app.services.workflow_events import WorkflowEventHub, format_sse_event
+from app.services.workflow_intervention import build_workflow_intervention
 from app.services.workflow_step_runner import execute_one_step
 
 router = APIRouter(prefix="/api/workflow-runs", tags=["workflows"])
@@ -50,10 +58,132 @@ async def create_workflow_run(
 
 
 @router.get("", response_model=list[WorkflowRunRead])
-async def list_workflow_runs(session: AsyncSession = Depends(get_db_session)) -> list[WorkflowRunRead]:
-    result = await session.execute(select(WorkflowRun).order_by(WorkflowRun.updated_at.desc()))
+async def list_workflow_runs(
+    brief_snapshot_id: uuid.UUID | None = None,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[WorkflowRunRead]:
+    stmt = select(WorkflowRun)
+    if brief_snapshot_id is not None:
+        stmt = stmt.where(WorkflowRun.brief_snapshot_id == brief_snapshot_id)
+    stmt = stmt.order_by(WorkflowRun.updated_at.desc())
+    result = await session.execute(stmt)
     items = result.scalars().all()
     return [WorkflowRunRead.model_validate(item) for item in items]
+
+
+@router.delete("/{run_id}")
+async def delete_workflow_run(
+    run_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, bool]:
+    run = await session.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="workflow_run_not_found")
+
+    await cascade_delete.delete_workflow_run(session=session, run_id=run.id, app=request.app)
+    return {"deleted": True}
+
+
+@router.post("/{run_id}/interventions", response_model=WorkflowInterventionResponse)
+async def apply_workflow_intervention(
+    run_id: uuid.UUID,
+    payload: WorkflowInterventionRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkflowInterventionResponse:
+    run = await session.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="workflow_run_not_found")
+    if run.status in {RunStatus.succeeded, RunStatus.canceled}:
+        raise HTTPException(status_code=400, detail="workflow_run_not_intervenable")
+
+    target_step: WorkflowStepRun | None = None
+    if payload.step_id is not None:
+        target_step = await session.get(WorkflowStepRun, payload.step_id)
+        if not target_step:
+            raise HTTPException(status_code=404, detail="workflow_step_run_not_found")
+        if target_step.workflow_run_id != run.id:
+            raise HTTPException(status_code=400, detail="workflow_step_not_in_run")
+
+    llm = await resolve_llm_client(session=session, app=request.app)
+    if llm is None:
+        raise HTTPException(status_code=400, detail="openai_not_configured")
+
+    instruction = (payload.instruction or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction_required")
+
+    run_state: dict[str, Any] = dict(run.state or {})
+    target_step_json: dict[str, Any] | None = None
+    if target_step is not None:
+        target_step_json = {
+            "id": str(target_step.id),
+            "step_name": target_step.step_name,
+            "step_index": target_step.step_index,
+            "status": str(target_step.status.value),
+            "outputs": dict(target_step.outputs or {}),
+            "error": target_step.error,
+        }
+
+    result = await build_workflow_intervention(
+        llm=llm,
+        run_kind=str(run.kind.value),
+        run_status=str(run.status.value),
+        run_state=run_state,
+        instruction=instruction,
+        target_step=target_step_json,
+    )
+
+    patch = dict(result.state_patch or {})
+    run.state = deep_merge(run_state, patch)
+
+    # Record as a step run for audit/history.
+    next_index = await session.scalar(
+        select(func.count()).select_from(WorkflowStepRun).where(WorkflowStepRun.workflow_run_id == run.id)
+    )
+    step_index = int(next_index or 0) + 1
+    now = datetime.now().astimezone()
+    step = WorkflowStepRun(
+        workflow_run_id=run.id,
+        step_name="intervention",
+        step_index=step_index,
+        status=RunStatus.succeeded,
+        outputs={
+            "instruction": instruction,
+            "assistant_message": result.assistant_message,
+            "state_patch": patch,
+            "target_step_id": str(target_step.id) if target_step is not None else None,
+            "target_step_name": target_step.step_name if target_step is not None else None,
+        },
+        error=None,
+        started_at=now,
+        finished_at=now,
+    )
+    session.add(step)
+    await session.commit()
+    await session.refresh(step)
+    await session.refresh(run)
+
+    hub = getattr(request.app.state, "workflow_event_hub", None)
+    if hub is not None:
+        await hub.publish(
+            run_id=run.id,
+            name="step",
+            payload={"step": WorkflowStepRunRead.model_validate(step).model_dump(mode="json")},
+        )
+        await hub.publish(
+            run_id=run.id,
+            name="run",
+            payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+        )
+
+    return WorkflowInterventionResponse(
+        run=WorkflowRunRead.model_validate(run),
+        step=WorkflowStepRunRead.model_validate(step),
+        assistant_message=result.assistant_message,
+        state_patch=patch,
+    )
 
 
 @router.get("/{run_id}", response_model=WorkflowRunRead)
@@ -293,17 +423,36 @@ async def execute_workflow_next(
 
     if run.status == RunStatus.paused:
         raise HTTPException(status_code=400, detail="workflow_run_paused")
-    if run.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+    if run.status in {RunStatus.succeeded, RunStatus.canceled}:
         raise HTTPException(status_code=400, detail="workflow_run_not_runnable")
 
-    llm = getattr(request.app.state, "llm_client", None)
-    embeddings = getattr(request.app.state, "embeddings_client", None)
+    if run.status == RunStatus.failed:
+        run.status = RunStatus.queued
+        run.error = None
+        await session.commit()
+        await session.refresh(run)
+
+    llm, embeddings, meta = await resolve_llm_and_embeddings(session=session, app=request.app)
     if llm is None or embeddings is None:
         raise HTTPException(status_code=400, detail="openai_not_configured")
 
     hub = getattr(request.app.state, "workflow_event_hub", None)
     step = await execute_one_step(session=session, llm=llm, embeddings=embeddings, run=run, hub=hub)
     await session.refresh(run)
+
+    if run.status == RunStatus.failed and isinstance(run.error, dict):
+        effective = meta.get("effective")
+        if isinstance(effective, dict):
+            run.error = deep_merge(dict(run.error), {"provider": effective})
+            await session.commit()
+            await session.refresh(run)
+            if hub is not None:
+                await hub.publish(
+                    run_id=run.id,
+                    name="run",
+                    payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+                )
+
     return WorkflowNextResponse(
         run=WorkflowRunRead.model_validate(run),
         step=WorkflowStepRunRead.model_validate(step),
@@ -313,10 +462,8 @@ async def execute_workflow_next(
 async def _autorun_loop(app: FastAPI, *, run_id: uuid.UUID, stop_event: asyncio.Event) -> None:
     sessionmaker = getattr(app.state, "sessionmaker", None)
     hub = getattr(app.state, "workflow_event_hub", None)
-    llm = getattr(app.state, "llm_client", None)
-    embeddings = getattr(app.state, "embeddings_client", None)
 
-    if sessionmaker is None or llm is None or embeddings is None:
+    if sessionmaker is None:
         return
 
     try:
@@ -329,6 +476,11 @@ async def _autorun_loop(app: FastAPI, *, run_id: uuid.UUID, stop_event: asyncio.
                     return
                 if run.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
                     return
+
+                llm, embeddings, meta = await resolve_llm_and_embeddings(session=session, app=app)
+                if llm is None or embeddings is None:
+                    return
+
                 await execute_one_step(
                     session=session,
                     llm=llm,
@@ -336,6 +488,19 @@ async def _autorun_loop(app: FastAPI, *, run_id: uuid.UUID, stop_event: asyncio.
                     run=run,
                     hub=hub,
                 )
+                await session.refresh(run)
+                if run.status == RunStatus.failed and isinstance(run.error, dict):
+                    effective = meta.get("effective")
+                    if isinstance(effective, dict):
+                        run.error = deep_merge(dict(run.error), {"provider": effective})
+                        await session.commit()
+                        await session.refresh(run)
+                        if hub is not None:
+                            await hub.publish(
+                                run_id=run.id,
+                                name="run",
+                                payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+                            )
             await asyncio.sleep(0)
     except asyncio.CancelledError:
         return
@@ -364,11 +529,16 @@ async def autorun_start(
         raise HTTPException(status_code=404, detail="workflow_run_not_found")
     if run.status == RunStatus.paused:
         raise HTTPException(status_code=400, detail="workflow_run_paused")
-    if run.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+    if run.status in {RunStatus.succeeded, RunStatus.canceled}:
         raise HTTPException(status_code=400, detail="workflow_run_not_runnable")
 
-    llm = getattr(request.app.state, "llm_client", None)
-    embeddings = getattr(request.app.state, "embeddings_client", None)
+    if run.status == RunStatus.failed:
+        run.status = RunStatus.queued
+        run.error = None
+        await session.commit()
+        await session.refresh(run)
+
+    llm, embeddings, _meta = await resolve_llm_and_embeddings(session=session, app=request.app)
     if llm is None or embeddings is None:
         raise HTTPException(status_code=400, detail="openai_not_configured")
 

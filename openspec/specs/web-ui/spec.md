@@ -63,3 +63,56 @@ The web UI SHALL provide export actions for a selected snapshot.
 - **WHEN** the user clicks an export action
 - **THEN** the UI SHALL download the generated file and report errors if export fails
 
+### Requirement: UI can configure model provider settings
+The web UI SHALL provide a panel to view and update the OpenAI-compatible provider settings used by the backend.
+
+#### Scenario: Save provider settings in the UI
+- **WHEN** the user enters a base URL and API key and clicks save
+- **THEN** the UI SHALL persist the settings via the API and indicate that an API key is configured
+
+#### Scenario: Clear provider API key in the UI
+- **WHEN** the user clears the stored key
+- **THEN** the UI SHALL show the provider as unconfigured and report errors from LLM-backed features
+
+### Requirement: UI streams brief chat responses
+The web UI SHALL display the assistant response incrementally while a brief chat message is in progress.
+
+#### Scenario: Show typing updates during brief chat
+- **WHEN** the user sends a brief chat message
+- **THEN** the UI SHALL render streamed assistant deltas and prevent duplicate sends until completion
+
+### Requirement: UI shows Brief → Snapshot → Run hierarchy
+The web UI SHALL present a hierarchical view where selecting a Brief narrows the visible Snapshots, and selecting a Snapshot narrows the visible Workflow Runs.
+
+#### Scenario: Filter runs by selected snapshot
+- **GIVEN** multiple Briefs exist and each has Snapshots
+- **AND** multiple workflow runs exist across Snapshots
+- **WHEN** the user selects a Snapshot
+- **THEN** the UI SHALL show only the workflow runs whose `brief_snapshot_id` matches the selected Snapshot
+
+### Requirement: UI supports deleting Briefs, Snapshots, and Runs
+The web UI SHALL provide delete actions for Briefs, Snapshots, and Workflow Runs, with user confirmation.
+
+#### Scenario: Confirm and delete a snapshot from UI
+- **GIVEN** a Snapshot is selected in the UI
+- **WHEN** the user confirms deletion
+- **THEN** the UI SHALL call the delete API
+- **AND** the UI SHALL refresh lists and clear selections that referenced deleted items
+
+### Requirement: UI displays workflow runs with Chinese, phase-aware names
+The web UI SHALL display workflow run list items using Chinese labels derived from workflow kind and current cursor phase/index.
+
+#### Scenario: Show novel chapter progress label
+- **GIVEN** a novel workflow run has cursor phase `novel_chapter_draft` and `chapter_index=3`
+- **WHEN** the UI renders the workflow run list
+- **THEN** the run SHALL be labeled similar to `小说 · 第3章 · 草稿`
+
+### Requirement: UI supports workflow node intervention chat
+The web UI SHALL provide a “节点对话干预” panel when a workflow run is selected, allowing the user to send an instruction and apply the resulting state patch.
+
+#### Scenario: Send an intervention from the UI
+- **GIVEN** a workflow run is selected in the UI
+- **WHEN** the user sends an intervention instruction
+- **THEN** the UI SHALL call the intervention API
+- **AND** the UI SHALL refresh run state and step history
+

@@ -29,6 +29,7 @@ from app.schemas.propagation import (
     PropagationRepairResponse,
     RepairedArtifactVersion,
 )
+from app.services.llm_provider import resolve_embeddings_client, resolve_llm_client
 from app.services.memory_store import index_artifact_version
 from app.services.propagation_extraction import extract_fact_changes, repair_impacted_content
 
@@ -190,7 +191,7 @@ async def preview_propagation(
         edited_artifact=edited_artifact,
     )
 
-    llm = getattr(request.app.state, "llm_client", None)
+    llm = await resolve_llm_client(session=session, app=request.app) if use_llm else None
     patches: dict[str, Any] = {}
     if use_llm and llm is not None:
         base_artifact = await _get_artifact(session, base_version.artifact_id)
@@ -251,7 +252,7 @@ async def apply_propagation(
         edited_artifact=edited_artifact,
     )
 
-    llm = getattr(request.app.state, "llm_client", None)
+    llm = await resolve_llm_client(session=session, app=request.app) if use_llm else None
     patches: dict[str, Any] = {}
     if use_llm and llm is not None:
         base_artifact = await _get_artifact(session, base_version.artifact_id)
@@ -335,7 +336,7 @@ async def repair_impacts(
     if event.brief_snapshot_id != snapshot.id:
         raise HTTPException(status_code=400, detail="propagation_event_not_in_snapshot")
 
-    llm = getattr(request.app.state, "llm_client", None)
+    llm = await resolve_llm_client(session=session, app=request.app)
     if llm is None:
         raise HTTPException(status_code=400, detail="openai_not_configured")
 
@@ -394,7 +395,7 @@ async def repair_impacts(
         )
         updated_impacts.append(impact)
 
-        embeddings = getattr(request.app.state, "embeddings_client", None)
+        embeddings = await resolve_embeddings_client(session=session, app=request.app)
         if embeddings is not None:
             try:
                 await index_artifact_version(

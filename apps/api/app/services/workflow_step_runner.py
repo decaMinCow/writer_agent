@@ -11,6 +11,7 @@ from app.db.models import RunStatus, WorkflowKind, WorkflowRun, WorkflowStepRun
 from app.llm.client import LLMClient
 from app.llm.embeddings_client import EmbeddingsClient
 from app.schemas.workflows import WorkflowRunRead, WorkflowStepRunRead
+from app.services.error_utils import format_exception_chain
 from app.services.workflow_events import WorkflowEventHub
 from app.services.workflow_executor import execute_next_step
 
@@ -111,15 +112,22 @@ async def execute_one_step(
         await _publish_run(hub, run=run)
         return step
     except Exception as exc:
+        error_chain = format_exception_chain(exc)
         step.status = RunStatus.failed
-        step.error = str(exc)
+        step.error = error_chain
         step.finished_at = _now()
         run.status = RunStatus.failed
-        run.error = {"detail": "step_failed", "error": str(exc)}
+        run.error = {
+            "detail": "step_failed",
+            "step_name": step_name,
+            "step_index": step_index,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+            "error_chain": error_chain,
+        }
         await session.commit()
         await session.refresh(step)
         await session.refresh(run)
         await _publish_step(hub, step=step)
         await _publish_run(hub, run=run)
         return step
-

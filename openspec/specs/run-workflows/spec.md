@@ -28,3 +28,26 @@ The system SHALL track per-step execution for a workflow run, including outputs 
 - **WHEN** a workflow step fails
 - **THEN** the system SHALL persist the failure status and error details for debugging
 
+### Requirement: Delete a workflow run and its produced content
+The system SHALL allow deleting a workflow run and SHALL delete the run history (step runs) and any content produced by that run (including artifact versions and dependent records).
+
+#### Scenario: Delete a workflow run removes its step history and versions
+- **GIVEN** a workflow run exists
+- **AND** the run has one or more step runs
+- **AND** the run produced one or more artifact versions
+- **WHEN** the user deletes the workflow run
+- **THEN** the system SHALL delete the workflow run
+- **AND** the system SHALL delete its step runs
+- **AND** the system SHALL delete artifact versions produced by the run
+- **AND** the system SHALL delete any records that reference those deleted versions (e.g., memory chunks, KG events, lint issues, open thread refs, propagation events/impacts)
+
+### Requirement: Apply chat-based interventions to workflow run state
+The system SHALL allow applying a natural-language intervention to a workflow run, producing a state patch that updates `workflow_runs.state` and is persisted for audit.
+
+#### Scenario: Apply an intervention tied to a selected step
+- **GIVEN** a workflow run exists with one or more step runs
+- **WHEN** the user submits an intervention instruction referencing a chosen step
+- **THEN** the system SHALL generate an assistant response and a `state_patch`
+- **AND** the system SHALL apply the patch to the workflow run state
+- **AND** the system SHALL record the intervention as a `workflow_step_runs` entry
+

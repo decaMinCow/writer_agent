@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
-from app.schemas.settings import OutputSpecDefaultsPatch, OutputSpecDefaultsRead
-from app.services.settings_store import get_output_spec_defaults, patch_output_spec_defaults
+from app.schemas.settings import (
+    LlmProviderSettingsPatch,
+    LlmProviderSettingsRead,
+    OutputSpecDefaultsPatch,
+    OutputSpecDefaultsRead,
+)
+from app.services.settings_store import (
+    get_llm_provider_settings,
+    get_output_spec_defaults,
+    patch_llm_provider_settings,
+    patch_output_spec_defaults,
+ )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -34,3 +44,36 @@ async def patch_output_spec_defaults_route(
     resolved = await patch_output_spec_defaults(session=session, patch=patch)
     return OutputSpecDefaultsRead.model_validate(resolved)
 
+
+@router.get("/llm-provider", response_model=LlmProviderSettingsRead)
+async def get_llm_provider_settings_route(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> LlmProviderSettingsRead:
+    env_settings = getattr(request.app.state, "settings", None)
+    resolved = await get_llm_provider_settings(session=session, env_settings=env_settings)
+    return LlmProviderSettingsRead.model_validate(resolved)
+
+
+@router.patch("/llm-provider", response_model=LlmProviderSettingsRead)
+async def patch_llm_provider_settings_route(
+    request: Request,
+    payload: LlmProviderSettingsPatch,
+    session: AsyncSession = Depends(get_db_session),
+) -> LlmProviderSettingsRead:
+    patch: dict[str, object | None] = {}
+    if "base_url" in payload.model_fields_set:
+        patch["base_url"] = payload.base_url
+    if "model" in payload.model_fields_set:
+        patch["model"] = payload.model
+    if "embeddings_model" in payload.model_fields_set:
+        patch["embeddings_model"] = payload.embeddings_model
+    if "timeout_s" in payload.model_fields_set:
+        patch["timeout_s"] = payload.timeout_s
+    if "api_key" in payload.model_fields_set:
+        patch["api_key"] = payload.api_key
+
+    await patch_llm_provider_settings(session=session, patch=patch)
+    env_settings = getattr(request.app.state, "settings", None)
+    resolved = await get_llm_provider_settings(session=session, env_settings=env_settings)
+    return LlmProviderSettingsRead.model_validate(resolved)

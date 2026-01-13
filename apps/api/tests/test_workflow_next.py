@@ -443,3 +443,75 @@ async def test_novel_to_script_happy_path_and_honors_script_format(
     assert step4.status_code == 200
     assert step4.json()["run"]["status"] == "succeeded"
     assert "artifact_version_id" in step4.json()["step"]["outputs"]
+
+
+async def test_next_allows_retry_when_run_is_failed(client_with_llm_and_embeddings, llm_stub):
+    brief = await client_with_llm_and_embeddings.post("/api/briefs", json={"title": "测试作品", "content": {}})
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={"kind": "novel", "brief_snapshot_id": snap_id, "status": "failed", "state": {}},
+    )
+    run_id = run.json()["id"]
+
+    patched = await client_with_llm_and_embeddings.patch(
+        f"/api/workflow-runs/{run_id}", json={"error": {"detail": "pretend_failure"}}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "failed"
+    assert patched.json()["error"]["detail"] == "pretend_failure"
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "chapters": [
+                    {
+                        "index": 1,
+                        "title": "第一章：开端",
+                        "summary": "主角发现异常并被卷入。",
+                        "hook": "一个陌生号码发来一句话。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["step"]["status"] == "succeeded"
+    assert body["run"]["status"] == "running"
+    assert body["run"]["error"] is None
+
+
+async def test_next_returns_error_chain_when_step_fails(client_with_llm_and_embeddings):
+    brief = await client_with_llm_and_embeddings.post("/api/briefs", json={"title": "测试作品", "content": {}})
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={"kind": "novel", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+    )
+    run_id = run.json()["id"]
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["run"]["status"] == "failed"
+    assert body["run"]["error"]["detail"] == "step_failed"
+    assert "error_chain" in body["run"]["error"]
+    assert "RuntimeError" in body["run"]["error"]["error_chain"]
+    assert "stub_llm_no_output" in body["run"]["error"]["error_chain"]
+    assert body["run"]["error"]["step_name"] == "novel_outline"
+    assert body["run"]["error"]["step_index"] == 1
+    assert "provider" in body["run"]["error"]
+
+    assert body["step"]["status"] == "failed"
+    assert "RuntimeError" in (body["step"]["error"] or "")

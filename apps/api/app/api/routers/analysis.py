@@ -28,6 +28,7 @@ from app.schemas.kg import (
 from app.schemas.lint import LintIssueRead, LintRunResponse
 from app.services.kg_extraction import extract_kg_for_artifact_version
 from app.services.kg_store import PostgresKgStore
+from app.services.llm_provider import resolve_llm_client
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
 
 router = APIRouter(prefix="/api/brief-snapshots", tags=["analysis"])
@@ -109,7 +110,7 @@ async def rebuild_knowledge_graph(
 ) -> KnowledgeGraphRebuildResponse:
     snapshot = await _get_snapshot(session, snapshot_id)
 
-    llm = getattr(request.app.state, "llm_client", None)
+    llm = await resolve_llm_client(session=session, app=request.app)
     if llm is None:
         raise HTTPException(status_code=400, detail="openai_not_configured")
 
@@ -275,7 +276,7 @@ async def run_story_linter(
                 )
 
     if use_llm:
-        llm = getattr(request.app.state, "llm_client", None)
+        llm = await resolve_llm_client(session=session, app=request.app)
         if llm is not None:
             artifact_summaries: list[dict[str, Any]] = []
             for artifact, version in sources:

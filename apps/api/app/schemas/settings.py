@@ -20,3 +20,22 @@ class OutputSpecDefaultsPatch(BaseModel):
     script_format: ScriptFormat | None = None
     script_format_notes: str | None = None
 
+
+class LlmProviderSettingsRead(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    base_url: str | None = None
+    model: str
+    embeddings_model: str
+    timeout_s: float
+    api_key_configured: bool
+
+
+class LlmProviderSettingsPatch(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    base_url: str | None = None
+    model: str | None = None
+    embeddings_model: str | None = None
+    timeout_s: float | None = None
+    api_key: str | None = None

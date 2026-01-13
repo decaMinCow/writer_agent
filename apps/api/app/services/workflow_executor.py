@@ -30,6 +30,7 @@ from app.schemas.generation import (
     RewriteResult,
     ScriptSceneList,
 )
+from app.services.error_utils import format_exception_chain
 from app.services.json_utils import deep_merge
 from app.services.memory_store import index_artifact_version, retrieve_evidence
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
@@ -921,11 +922,17 @@ async def execute_next_step_safe(
         await session.refresh(step_run)
         return step_run
     except (ValidationError, RuntimeError) as exc:
+        error_chain = format_exception_chain(exc)
         step_run.status = RunStatus.failed
-        step_run.error = str(exc)
+        step_run.error = error_chain
         step_run.finished_at = _now()
         run.status = RunStatus.failed
-        run.error = {"detail": "step_failed", "error": str(exc)}
+        run.error = {
+            "detail": "step_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+            "error_chain": error_chain,
+        }
         await session.commit()
         await session.refresh(step_run)
         return step_run

@@ -14,13 +14,14 @@ docker compose -f infra/compose.yml up -d
 ```bash
 cd apps/api
 cp .env.example .env
-# set OPENAI_API_KEY in .env to enable the Brief Builder endpoints
+# Optional: set OPENAI_API_KEY / OPENAI_BASE_URL in .env (env fallback),
+# or configure provider settings in the web UI panel “模型提供商（OpenAI 兼容）”.
 uv sync
 uv run alembic upgrade head
-uv run uvicorn app.main:app --reload --port 8000
+uv run uvicorn app.main:app --reload --port 9761
 ```
 
-Health check: `http://localhost:8000/healthz`
+Health check: `http://localhost:9761/healthz`
 
 ### 3) Run the web app (SvelteKit + Tailwind)
 ```bash
