@@ -47,3 +47,15 @@ class LlmProviderSettingsPatch(BaseModel):
     timeout_s: float | None = None
     max_retries: int | None = None
     api_key: str | None = None
+
+
+class NovelToScriptPromptDefaultsRead(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    conversion_notes: str | None = None
+
+
+class NovelToScriptPromptDefaultsPatch(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    conversion_notes: str | None = None

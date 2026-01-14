@@ -35,8 +35,18 @@ async def create_artifact(
 
 
 @router.get("", response_model=list[ArtifactRead])
-async def list_artifacts(session: AsyncSession = Depends(get_db_session)) -> list[ArtifactRead]:
-    result = await session.execute(select(Artifact).order_by(Artifact.updated_at.desc()))
+async def list_artifacts(
+    brief_snapshot_id: uuid.UUID | None = None,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ArtifactRead]:
+    stmt = select(Artifact)
+    if brief_snapshot_id is not None:
+        stmt = (
+            stmt.join(ArtifactVersion, ArtifactVersion.artifact_id == Artifact.id)
+            .where(ArtifactVersion.brief_snapshot_id == brief_snapshot_id)
+            .distinct()
+        )
+    result = await session.execute(stmt.order_by(Artifact.updated_at.desc()))
     items = result.scalars().all()
     return [ArtifactRead.model_validate(item) for item in items]
 
@@ -102,16 +112,19 @@ async def create_artifact_version(
 @router.get("/{artifact_id}/versions", response_model=list[ArtifactVersionRead])
 async def list_artifact_versions(
     artifact_id: uuid.UUID,
+    brief_snapshot_id: uuid.UUID | None = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ArtifactVersionRead]:
     artifact = await session.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="artifact_not_found")
 
+    stmt = select(ArtifactVersion).where(ArtifactVersion.artifact_id == artifact.id)
+    if brief_snapshot_id is not None:
+        stmt = stmt.where(ArtifactVersion.brief_snapshot_id == brief_snapshot_id)
+
     result = await session.execute(
-        select(ArtifactVersion)
-        .where(ArtifactVersion.artifact_id == artifact.id)
-        .order_by(ArtifactVersion.created_at.desc())
+        stmt.order_by(ArtifactVersion.created_at.desc())
     )
     items = result.scalars().all()
     return [ArtifactVersionRead.model_validate(item) for item in items]

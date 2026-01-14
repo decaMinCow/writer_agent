@@ -291,6 +291,141 @@ async def test_novel_to_script_fails_when_no_novel_sources(client_with_llm_and_e
     assert body["step"]["status"] == "failed"
 
 
+async def test_novel_to_script_prefers_snapshot_notes_over_global_when_run_notes_missing(
+    client_with_llm_and_embeddings, llm_stub
+):
+    patched = await client_with_llm_and_embeddings.patch(
+        "/api/settings/novel-to-script-prompt",
+        json={"conversion_notes": "GLOBAL NTS RULES"},
+    )
+    assert patched.status_code == 200
+
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={
+            "title": "测试作品",
+            "content": {"output_spec": {"script_format": "custom", "script_format_notes": "SNAPSHOT NOTES"}},
+        },
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "夜里来电",
+                        "location": "公寓客厅",
+                        "time": "夜",
+                        "characters": ["主角"],
+                        "purpose": "引入悬念。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    assert llm_stub.calls
+    prompt = llm_stub.calls[-1]["user_prompt"]
+    assert "SNAPSHOT NOTES" in prompt
+    assert "GLOBAL NTS RULES" not in prompt
+
+
+async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_and_run_notes_missing(
+    client_with_llm_and_embeddings, llm_stub
+):
+    patched = await client_with_llm_and_embeddings.patch(
+        "/api/settings/novel-to-script-prompt",
+        json={"conversion_notes": "GLOBAL NTS RULES"},
+    )
+    assert patched.status_code == 200
+
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={
+            "title": "测试作品",
+            "content": {"output_spec": {"script_format": "custom"}},
+        },
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "夜里来电",
+                        "location": "公寓客厅",
+                        "time": "夜",
+                        "characters": ["主角"],
+                        "purpose": "引入悬念。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    assert llm_stub.calls
+    prompt = llm_stub.calls[-1]["user_prompt"]
+    assert "GLOBAL NTS RULES" in prompt
+
+
 async def test_novel_to_script_retry_resets_failed_cursor_phase(client_with_llm_and_embeddings, llm_stub):
     brief = await client_with_llm_and_embeddings.post("/api/briefs", json={"title": "测试作品", "content": {}})
     brief_id = brief.json()["id"]

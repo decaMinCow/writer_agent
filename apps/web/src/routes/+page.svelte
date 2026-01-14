@@ -14,6 +14,7 @@
 		forkWorkflowRun,
 		getArtifactVersion,
 		getGlobalOutputSpecDefaults,
+		getNovelToScriptPromptDefaults,
 		getLlmProviderSettings,
 		getKnowledgeGraph,
 		createArtifactVersion,
@@ -33,6 +34,7 @@
 		updateOpenThread,
 		patchBriefOutputSpecOverrides,
 		patchGlobalOutputSpecDefaults,
+		patchNovelToScriptPromptDefaults,
 		patchLlmProviderSettings,
 		streamBriefMessage,
 		rebuildKnowledgeGraph,
@@ -65,6 +67,7 @@
 		type PropagationPreviewResponse,
 		type GlossaryEntryRead,
 		type OutputSpecDefaults,
+		type NovelToScriptPromptDefaults,
 		type LlmProviderSettings,
 		type ScriptFormat,
 		type WorkflowRunRead,
@@ -92,6 +95,10 @@
 	let globalAutoStepRetriesDraft = '3';
 	let globalAutoStepBackoffDraft = '1';
 	let savingGlobalPrefs = false;
+
+	let globalNtsPrompt: NovelToScriptPromptDefaults | null = null;
+	let globalNtsPromptDraft = '';
+	let savingGlobalNtsPrompt = false;
 
 	let llmProviderSettings: LlmProviderSettings | null = null;
 	let providerBaseUrlDraft = '';
@@ -280,6 +287,11 @@
 		globalAutoStepBackoffDraft = String(globalOutputSpec.auto_step_backoff_s ?? 1);
 	}
 
+	function syncGlobalNtsPromptDrafts() {
+		if (!globalNtsPrompt) return;
+		globalNtsPromptDraft = globalNtsPrompt.conversion_notes ?? '';
+	}
+
 	function syncProviderDrafts() {
 		if (!llmProviderSettings) return;
 		providerBaseUrlDraft = llmProviderSettings.base_url ?? '';
@@ -345,10 +357,14 @@
 	async function refreshAll() {
 		error = null;
 		try {
+			const snapshotId = selectedSnapshot?.id ?? null;
+			const artifactsPromise = snapshotId
+				? listArtifacts({ brief_snapshot_id: snapshotId })
+				: Promise.resolve([] as ArtifactRead[]);
 			[briefs, workflowRuns, artifacts] = await Promise.all([
 				listBriefs(),
 				listWorkflowRuns(),
-				listArtifacts(),
+				artifactsPromise,
 			]);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -358,8 +374,12 @@
 	async function refreshSettings() {
 		error = null;
 		try {
-			globalOutputSpec = await getGlobalOutputSpecDefaults();
+			[globalOutputSpec, globalNtsPrompt] = await Promise.all([
+				getGlobalOutputSpecDefaults(),
+				getNovelToScriptPromptDefaults(),
+			]);
 			syncGlobalDrafts();
+			syncGlobalNtsPromptDrafts();
 			syncBriefOverrideDrafts();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -444,6 +464,7 @@
 		artifactVersions = [];
 		selectedArtifactVersion = null;
 		artifactEditorDraft = '';
+		artifacts = [];
 		clearPropagation();
 		knowledgeGraph = null;
 		lintIssues = [];
@@ -483,7 +504,8 @@
 		}
 	}
 
-	async function selectArtifact(artifact: ArtifactRead) {
+	async function selectArtifact(artifact: ArtifactRead, briefSnapshotId: string | null = null) {
+		const snapshotId = briefSnapshotId;
 		closeRunEvents();
 		autoRunning = false;
 		selectedArtifact = artifact;
@@ -506,7 +528,10 @@
 		openThreadRefs = [];
 		glossaryEntries = [];
 		try {
-			artifactVersions = await listArtifactVersions(artifact.id);
+			artifactVersions = await listArtifactVersions(
+				artifact.id,
+				snapshotId ? { brief_snapshot_id: snapshotId } : undefined,
+			);
 			if (artifactVersions.length > 0) {
 				selectArtifactVersion(artifactVersions[0]);
 			}
@@ -542,12 +567,16 @@
 		error = null;
 		rewritingSelection = true;
 		try {
+			const snapshotId = selectedArtifactVersion.brief_snapshot_id ?? null;
 			const created = await rewriteArtifactVersion(selectedArtifactVersion.id, {
 				instruction,
 				selection_start: rewriteSelectionStart,
 				selection_end: rewriteSelectionEnd,
 			});
-			artifactVersions = await listArtifactVersions(selectedArtifact.id);
+			artifactVersions = await listArtifactVersions(
+				selectedArtifact.id,
+				snapshotId ? { brief_snapshot_id: snapshotId } : undefined,
+			);
 			selectArtifactVersion(created);
 			rewriteInstructionDraft = '';
 			rewriteSelectionStart = null;
@@ -580,7 +609,10 @@
 					edited_at: new Date().toISOString(),
 				},
 			});
-			artifactVersions = await listArtifactVersions(selectedArtifact.id);
+			artifactVersions = await listArtifactVersions(
+				selectedArtifact.id,
+				snapshotId ? { brief_snapshot_id: snapshotId } : undefined,
+			);
 			selectArtifactVersion(created);
 			if (snapshotId) {
 				previewingPropagation = true;
@@ -838,24 +870,25 @@
 		}
 	}
 
-	async function openArtifactVersionFromIssue(versionId: string) {
-		error = null;
-		try {
-			const v = await getArtifactVersion(versionId);
-			let artifact = artifacts.find((a) => a.id === v.artifact_id) ?? null;
-			if (!artifact) {
-				artifacts = await listArtifacts();
-				artifact = artifacts.find((a) => a.id === v.artifact_id) ?? null;
+		async function openArtifactVersionFromIssue(versionId: string) {
+			error = null;
+			try {
+				const v = await getArtifactVersion(versionId);
+				let artifact = artifacts.find((a) => a.id === v.artifact_id) ?? null;
+				if (!artifact) {
+					const snapshotId = v.brief_snapshot_id ?? selectedSnapshot?.id ?? null;
+					artifacts = await listArtifacts(snapshotId ? { brief_snapshot_id: snapshotId } : undefined);
+					artifact = artifacts.find((a) => a.id === v.artifact_id) ?? null;
+				}
+				if (!artifact) {
+					throw new Error(`artifact_not_found ${v.artifact_id}`);
+				}
+				await selectArtifact(artifact, v.brief_snapshot_id ?? null);
+				selectArtifactVersion(v);
+			} catch (e) {
+				error = e instanceof Error ? e.message : String(e);
 			}
-			if (!artifact) {
-				throw new Error(`artifact_not_found ${v.artifact_id}`);
-			}
-			await selectArtifact(artifact);
-			selectArtifactVersion(v);
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
 		}
-	}
 
 	async function selectSnapshot(snap: BriefSnapshotRead) {
 		if (selectedSnapshot?.id !== snap.id) {
@@ -864,13 +897,22 @@
 			selectedRun = null;
 			workflowSteps = [];
 			selectedStep = null;
+			selectedArtifact = null;
+			artifactVersions = [];
+			selectedArtifactVersion = null;
+			artifactEditorDraft = '';
 		}
 		selectedSnapshot = snap;
 		showSnapshotJson = false;
-		ntsSourceSnapshotIdDraft = snap.id;
-		const effective = effectiveOutputSpec();
-		ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
-		ntsConversionNotesDraft = effective?.script_format_notes ?? '';
+			ntsSourceSnapshotIdDraft = snap.id;
+			const effective = effectiveOutputSpec();
+			ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
+			ntsConversionNotesDraft = '';
+			try {
+				artifacts = await listArtifacts({ brief_snapshot_id: snap.id });
+			} catch (e) {
+				error = e instanceof Error ? e.message : String(e);
+		}
 		await refreshAnalysis();
 	}
 
@@ -901,14 +943,14 @@
 			briefSnapshots = await listBriefSnapshots(selectedBrief.id);
 			selectedSnapshot = snap;
 			showSnapshotJson = false;
-			ntsSourceSnapshotIdDraft = snap.id;
-			const effective = effectiveOutputSpec();
-			ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
-			ntsConversionNotesDraft = effective?.script_format_notes ?? '';
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			creatingSnapshot = false;
+				ntsSourceSnapshotIdDraft = snap.id;
+				const effective = effectiveOutputSpec();
+				ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
+				ntsConversionNotesDraft = '';
+			} catch (e) {
+				error = e instanceof Error ? e.message : String(e);
+			} finally {
+				creatingSnapshot = false;
 		}
 	}
 
@@ -1042,6 +1084,22 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			savingGlobalPrefs = false;
+		}
+	}
+
+	async function saveGlobalNtsPrompt() {
+		error = null;
+		savingGlobalNtsPrompt = true;
+		try {
+			const notes = globalNtsPromptDraft.trim();
+			globalNtsPrompt = await patchNovelToScriptPromptDefaults({
+				conversion_notes: notes ? notes : null,
+			});
+			syncGlobalNtsPromptDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingGlobalNtsPrompt = false;
 		}
 	}
 
@@ -1860,13 +1918,13 @@
 												placeholder="例如：先列关键剧情（STEP1），再写短剧剧本（STEP2）；每集 500–800 字；严格用 1-1/日夜/内外/地点/出场人物/△动作/台词/OS/OV/闪回…"
 												bind:value={ntsConversionNotesDraft}
 												disabled={creatingRun}
-											></textarea>
-											<div class="mt-1 text-[10px] text-zinc-500">
-												这会写入 run.state（conversion_output_spec），不会修改 Snapshot。
-											</div>
-										</label>
-									</div>
-								{/if}
+												></textarea>
+												<div class="mt-1 text-[10px] text-zinc-500">
+													这会写入 run.state（conversion_output_spec），不会修改 Snapshot；留空则使用 Snapshot/Brief 的输出备注，若也为空才使用全局转写规范（如已配置）。
+												</div>
+											</label>
+										</div>
+									{/if}
 							</div>
 						{/if}
 
@@ -2304,10 +2362,10 @@
 						{/if}
 					</div>
 
-					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-						<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
-							<span>全局偏好</span>
-							<button
+						<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+							<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
+								<span>全局偏好</span>
+								<button
 								class="rounded bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
 								onclick={refreshSettings}
 							>
@@ -2391,13 +2449,49 @@
 							</div>
 						{:else}
 							<div class="text-xs text-zinc-500">未加载（请检查 API 是否可用）</div>
-						{/if}
-					</div>
+							{/if}
+						</div>
 
-					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-						<div class="mb-2 text-xs font-semibold text-zinc-300">新建 Brief</div>
-						<div class="flex gap-2">
-							<input
+						<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+							<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
+								<span>小说→剧本 · 全局转写规范</span>
+								<button
+									class="rounded bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+									onclick={refreshSettings}
+								>
+									刷新
+								</button>
+							</div>
+
+							{#if globalNtsPrompt}
+								<div class="space-y-2 text-xs">
+									<textarea
+										class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										rows="6"
+										placeholder="留空表示不启用。可粘贴短剧格式/集场拆分/钩子规则/台词标准等。"
+										bind:value={globalNtsPromptDraft}
+										disabled={savingGlobalNtsPrompt}
+									></textarea>
+									<div class="text-[10px] text-zinc-500">
+										优先级：Run「转写规范备注」 &gt; Snapshot/Brief 的输出备注 &gt; 这里的全局默认。
+									</div>
+									<button
+										class="w-full rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+										onclick={saveGlobalNtsPrompt}
+										disabled={savingGlobalNtsPrompt}
+									>
+										{savingGlobalNtsPrompt ? '保存中…' : '保存全局转写规范'}
+									</button>
+								</div>
+							{:else}
+								<div class="text-xs text-zinc-500">未加载（请检查 API 是否可用）</div>
+							{/if}
+						</div>
+
+						<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+							<div class="mb-2 text-xs font-semibold text-zinc-300">新建 Brief</div>
+							<div class="flex gap-2">
+								<input
 								class="flex-1 rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600"
 								placeholder="标题（可空）"
 								bind:value={newBriefTitle}
@@ -3071,10 +3165,10 @@
 					<div class="mt-8 mb-3 text-xs font-semibold text-zinc-400">Artifacts</div>
 					<div class="space-y-1">
 						{#each artifacts as artifact (artifact.id)}
-							<button
-								class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
-								onclick={() => selectArtifact(artifact)}
-							>
+								<button
+									class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
+									onclick={() => selectArtifact(artifact, selectedSnapshot?.id ?? null)}
+								>
 								<span class="truncate">{artifact.title ?? artifact.kind}</span>
 								<span class="ml-2 text-[10px] text-zinc-500">
 									{artifact.ordinal ?? ''}

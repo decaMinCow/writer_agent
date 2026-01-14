@@ -127,3 +127,24 @@ async def test_llm_provider_settings_get_and_patch_and_clear(client):
     cleared_body = cleared.json()
     assert "api_key" not in cleared_body
     assert cleared_body["api_key_configured"] is False
+
+
+async def test_novel_to_script_prompt_defaults_get_and_patch_and_clear(client):
+    got = await client.get("/api/settings/novel-to-script-prompt")
+    assert got.status_code == 200
+    assert got.json()["conversion_notes"] is None
+
+    patched = await client.patch(
+        "/api/settings/novel-to-script-prompt",
+        json={"conversion_notes": "  全局短剧转写规范  "},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["conversion_notes"] == "全局短剧转写规范"
+
+    got2 = await client.get("/api/settings/novel-to-script-prompt")
+    assert got2.status_code == 200
+    assert got2.json()["conversion_notes"] == "全局短剧转写规范"
+
+    cleared = await client.patch("/api/settings/novel-to-script-prompt", json={"conversion_notes": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["conversion_notes"] is None

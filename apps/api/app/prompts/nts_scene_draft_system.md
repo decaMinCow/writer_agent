@@ -10,9 +10,9 @@
   - screenplay_int_ext：用 INT./EXT. 场景标题、动作、对白（无长篇内心独白）。
   - stage_play：偏舞台剧格式（场景/人物/舞台调度更明确）。
   - custom：参考 `output_spec.script_format_notes`。
+- 若 `output_spec.script_format_notes` 有内容，将其视为“转写规范/强约束”；在不违背所选 `script_format` 的前提下尽量遵循（例如：按集分场标题、每集强钩子、台词风格等）。
 
 输出 JSON 结构：
 {
   "text": "..."
 }
-

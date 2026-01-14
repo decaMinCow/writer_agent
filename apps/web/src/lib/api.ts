@@ -39,6 +39,11 @@ export type OutputSpecDefaults = {
 	[key: string]: unknown;
 };
 
+export type NovelToScriptPromptDefaults = {
+	conversion_notes: string | null;
+	[key: string]: unknown;
+};
+
 export type LlmProviderSettings = {
 	base_url: string | null;
 	model: string;
@@ -262,6 +267,19 @@ export async function patchGlobalOutputSpecDefaults(payload: {
 	auto_step_backoff_s?: number | null;
 }): Promise<OutputSpecDefaults> {
 	return await fetchJson<OutputSpecDefaults>('/api/settings/output-spec', {
+		method: 'PATCH',
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function getNovelToScriptPromptDefaults(): Promise<NovelToScriptPromptDefaults> {
+	return await fetchJson<NovelToScriptPromptDefaults>('/api/settings/novel-to-script-prompt');
+}
+
+export async function patchNovelToScriptPromptDefaults(payload: {
+	conversion_notes?: string | null;
+}): Promise<NovelToScriptPromptDefaults> {
+	return await fetchJson<NovelToScriptPromptDefaults>('/api/settings/novel-to-script-prompt', {
 		method: 'PATCH',
 		body: JSON.stringify(payload),
 	});
@@ -567,12 +585,19 @@ export async function resumeWorkflowRun(runId: string): Promise<WorkflowControlR
 	});
 }
 
-export async function listArtifacts(): Promise<ArtifactRead[]> {
-	return await fetchJson<ArtifactRead[]>('/api/artifacts');
+export async function listArtifacts(payload?: { brief_snapshot_id?: string | null }): Promise<ArtifactRead[]> {
+	const snapshotId = payload?.brief_snapshot_id ?? null;
+	const qs = snapshotId ? `?brief_snapshot_id=${encodeURIComponent(snapshotId)}` : '';
+	return await fetchJson<ArtifactRead[]>(`/api/artifacts${qs}`);
 }
 
-export async function listArtifactVersions(artifactId: string): Promise<ArtifactVersionRead[]> {
-	return await fetchJson<ArtifactVersionRead[]>(`/api/artifacts/${artifactId}/versions`);
+export async function listArtifactVersions(
+	artifactId: string,
+	payload?: { brief_snapshot_id?: string | null },
+): Promise<ArtifactVersionRead[]> {
+	const snapshotId = payload?.brief_snapshot_id ?? null;
+	const qs = snapshotId ? `?brief_snapshot_id=${encodeURIComponent(snapshotId)}` : '';
+	return await fetchJson<ArtifactVersionRead[]>(`/api/artifacts/${artifactId}/versions${qs}`);
 }
 
 export async function getArtifactVersion(versionId: string): Promise<ArtifactVersionRead> {

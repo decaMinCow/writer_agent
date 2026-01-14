@@ -11,6 +11,7 @@ from app.services.json_utils import deep_merge
 
 OUTPUT_SPEC_DEFAULTS_KEY = "output_spec_defaults"
 LLM_PROVIDER_SETTINGS_KEY = "llm_provider_settings"
+NOVEL_TO_SCRIPT_PROMPT_DEFAULTS_KEY = "novel_to_script_prompt_defaults"
 
 SERVER_OUTPUT_SPEC_DEFAULTS: dict[str, Any] = {
     "language": "zh-CN",
@@ -95,6 +96,38 @@ async def patch_output_spec_defaults(
 
     await session.commit()
     return await get_output_spec_defaults(session=session)
+
+
+async def get_novel_to_script_prompt_defaults(*, session: AsyncSession) -> dict[str, Any]:
+    setting = await session.get(AppSetting, NOVEL_TO_SCRIPT_PROMPT_DEFAULTS_KEY)
+    stored = dict(setting.value or {}) if setting else {}
+    conversion_notes = _normalize_optional_str(stored.get("conversion_notes"))
+    return {"conversion_notes": conversion_notes}
+
+
+async def patch_novel_to_script_prompt_defaults(
+    *,
+    session: AsyncSession,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    setting = await session.get(AppSetting, NOVEL_TO_SCRIPT_PROMPT_DEFAULTS_KEY)
+    stored: dict[str, Any] = dict(setting.value or {}) if setting else {}
+
+    raw = patch.get("conversion_notes", None)
+    cleaned = _normalize_optional_str(raw)
+    if cleaned is None:
+        stored.pop("conversion_notes", None)
+    else:
+        stored["conversion_notes"] = cleaned
+
+    if setting is None:
+        setting = AppSetting(key=NOVEL_TO_SCRIPT_PROMPT_DEFAULTS_KEY, value=stored)
+        session.add(setting)
+    else:
+        setting.value = stored
+
+    await session.commit()
+    return await get_novel_to_script_prompt_defaults(session=session)
 
 
 async def get_llm_provider_settings_raw(*, session: AsyncSession) -> dict[str, Any]:

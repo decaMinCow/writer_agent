@@ -7,13 +7,17 @@ from app.db.session import get_db_session
 from app.schemas.settings import (
     LlmProviderSettingsPatch,
     LlmProviderSettingsRead,
+    NovelToScriptPromptDefaultsPatch,
+    NovelToScriptPromptDefaultsRead,
     OutputSpecDefaultsPatch,
     OutputSpecDefaultsRead,
 )
 from app.services.settings_store import (
     get_llm_provider_settings,
+    get_novel_to_script_prompt_defaults,
     get_output_spec_defaults,
     patch_llm_provider_settings,
+    patch_novel_to_script_prompt_defaults,
     patch_output_spec_defaults,
  )
 
@@ -49,6 +53,26 @@ async def patch_output_spec_defaults_route(
 
     resolved = await patch_output_spec_defaults(session=session, patch=patch)
     return OutputSpecDefaultsRead.model_validate(resolved)
+
+
+@router.get("/novel-to-script-prompt", response_model=NovelToScriptPromptDefaultsRead)
+async def get_novel_to_script_prompt_defaults_route(
+    session: AsyncSession = Depends(get_db_session),
+) -> NovelToScriptPromptDefaultsRead:
+    resolved = await get_novel_to_script_prompt_defaults(session=session)
+    return NovelToScriptPromptDefaultsRead.model_validate(resolved)
+
+
+@router.patch("/novel-to-script-prompt", response_model=NovelToScriptPromptDefaultsRead)
+async def patch_novel_to_script_prompt_defaults_route(
+    payload: NovelToScriptPromptDefaultsPatch,
+    session: AsyncSession = Depends(get_db_session),
+) -> NovelToScriptPromptDefaultsRead:
+    patch: dict[str, object | None] = {}
+    if "conversion_notes" in payload.model_fields_set:
+        patch["conversion_notes"] = payload.conversion_notes
+    resolved = await patch_novel_to_script_prompt_defaults(session=session, patch=patch)
+    return NovelToScriptPromptDefaultsRead.model_validate(resolved)
 
 
 @router.get("/llm-provider", response_model=LlmProviderSettingsRead)

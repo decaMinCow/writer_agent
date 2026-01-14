@@ -35,6 +35,7 @@ from app.services.error_utils import format_exception_chain
 from app.services.json_utils import deep_merge
 from app.services.memory_store import index_artifact_version, retrieve_evidence
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
+from app.services.settings_store import get_novel_to_script_prompt_defaults
 from app.services.text_utils import apply_replacements, join_paragraphs, numbered_paragraphs
 from app.services.workflow_events import WorkflowEventHub
 
@@ -831,8 +832,39 @@ async def execute_next_step(
 
         output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
         conversion_output_spec = state.get("conversion_output_spec")
+        has_run_notes = False
         if isinstance(conversion_output_spec, dict):
-            output_spec = deep_merge(output_spec, dict(conversion_output_spec))
+            cleaned = dict(conversion_output_spec)
+            if "script_format_notes" in cleaned:
+                raw_notes = cleaned.get("script_format_notes")
+                if raw_notes is None:
+                    cleaned.pop("script_format_notes", None)
+                else:
+                    notes = str(raw_notes).strip()
+                    if not notes:
+                        cleaned.pop("script_format_notes", None)
+                    else:
+                        cleaned["script_format_notes"] = notes
+                        has_run_notes = True
+            output_spec = deep_merge(output_spec, cleaned)
+
+        raw_existing_notes = output_spec.get("script_format_notes")
+        if raw_existing_notes is None:
+            output_spec.pop("script_format_notes", None)
+        else:
+            existing_notes = str(raw_existing_notes).strip()
+            if existing_notes:
+                output_spec["script_format_notes"] = existing_notes
+            else:
+                output_spec.pop("script_format_notes", None)
+
+        if (not has_run_notes) and ("script_format_notes" not in output_spec):
+            defaults = await get_novel_to_script_prompt_defaults(session=session)
+            global_notes = defaults.get("conversion_notes")
+            if isinstance(global_notes, str):
+                global_notes = global_notes.strip()
+                if global_notes:
+                    output_spec["script_format_notes"] = global_notes
         brief_json_for_conversion = dict(brief_json) if isinstance(brief_json, dict) else {}
         brief_json_for_conversion["output_spec"] = output_spec
 
