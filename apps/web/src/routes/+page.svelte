@@ -89,6 +89,8 @@
 	let globalScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
 	let globalScriptNotesDraft = '';
 	let globalMaxFixAttemptsDraft = '2';
+	let globalAutoStepRetriesDraft = '3';
+	let globalAutoStepBackoffDraft = '1';
 	let savingGlobalPrefs = false;
 
 	let llmProviderSettings: LlmProviderSettings | null = null;
@@ -109,10 +111,14 @@
 	let overrideScriptFormat = false;
 	let overrideScriptNotes = false;
 	let overrideMaxFixAttempts = false;
+	let overrideAutoStepRetries = false;
+	let overrideAutoStepBackoff = false;
 	let briefLanguageDraft = 'zh-CN';
 	let briefScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
 	let briefScriptNotesDraft = '';
 	let briefMaxFixAttemptsDraft = '2';
+	let briefAutoStepRetriesDraft = '3';
+	let briefAutoStepBackoffDraft = '1';
 	let savingBriefPrefs = false;
 	let showBriefJson = false;
 	let showSnapshotJson = false;
@@ -245,6 +251,18 @@
 				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
 			if (Number.isFinite(parsed) && parsed >= 0) merged.max_fix_attempts = parsed;
 		}
+		if (hasOwn(overrides, 'auto_step_retries')) {
+			const v = (overrides as any).auto_step_retries;
+			const parsed =
+				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
+			if (Number.isFinite(parsed) && parsed >= 0) merged.auto_step_retries = parsed;
+		}
+		if (hasOwn(overrides, 'auto_step_backoff_s')) {
+			const v = (overrides as any).auto_step_backoff_s;
+			const parsed =
+				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseFloat(v) : NaN;
+			if (Number.isFinite(parsed) && parsed >= 0) merged.auto_step_backoff_s = parsed;
+		}
 
 		return merged;
 	}
@@ -255,6 +273,8 @@
 		globalScriptFormatDraft = globalOutputSpec.script_format;
 		globalScriptNotesDraft = globalOutputSpec.script_format_notes ?? '';
 		globalMaxFixAttemptsDraft = String(globalOutputSpec.max_fix_attempts ?? 2);
+		globalAutoStepRetriesDraft = String(globalOutputSpec.auto_step_retries ?? 3);
+		globalAutoStepBackoffDraft = String(globalOutputSpec.auto_step_backoff_s ?? 1);
 	}
 
 	function syncProviderDrafts() {
@@ -279,11 +299,15 @@
 		overrideScriptFormat = hasOwn(overrides, 'script_format');
 		overrideScriptNotes = hasOwn(overrides, 'script_format_notes');
 		overrideMaxFixAttempts = hasOwn(overrides, 'max_fix_attempts');
+		overrideAutoStepRetries = hasOwn(overrides, 'auto_step_retries');
+		overrideAutoStepBackoff = hasOwn(overrides, 'auto_step_backoff_s');
 
 		briefLanguageDraft = effective?.language ?? 'zh-CN';
 		briefScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
 		briefScriptNotesDraft = effective?.script_format_notes ?? '';
 		briefMaxFixAttemptsDraft = String(effective?.max_fix_attempts ?? 2);
+		briefAutoStepRetriesDraft = String(effective?.auto_step_retries ?? 3);
+		briefAutoStepBackoffDraft = String(effective?.auto_step_backoff_s ?? 1);
 
 		if (overrideLanguage && typeof overrides.language === 'string') {
 			briefLanguageDraft = overrides.language;
@@ -300,6 +324,18 @@
 			const parsed =
 				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
 			if (Number.isFinite(parsed) && parsed >= 0) briefMaxFixAttemptsDraft = String(parsed);
+		}
+		if (overrideAutoStepRetries) {
+			const v = (overrides as any).auto_step_retries;
+			const parsed =
+				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
+			if (Number.isFinite(parsed) && parsed >= 0) briefAutoStepRetriesDraft = String(parsed);
+		}
+		if (overrideAutoStepBackoff) {
+			const v = (overrides as any).auto_step_backoff_s;
+			const parsed =
+				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseFloat(v) : NaN;
+			if (Number.isFinite(parsed) && parsed >= 0) briefAutoStepBackoffDraft = String(parsed);
 		}
 	}
 
@@ -976,11 +1012,15 @@
 		savingGlobalPrefs = true;
 		try {
 			const maxFix = Number(globalMaxFixAttemptsDraft);
+			const retries = Number(globalAutoStepRetriesDraft);
+			const backoff = Number(globalAutoStepBackoffDraft);
 			globalOutputSpec = await patchGlobalOutputSpecDefaults({
 				language: globalLanguageDraft.trim() || null,
 				script_format: globalScriptFormatDraft,
 				script_format_notes: globalScriptNotesDraft.trim() ? globalScriptNotesDraft.trim() : null,
 				max_fix_attempts: Number.isFinite(maxFix) && maxFix >= 0 ? Math.floor(maxFix) : null,
+				auto_step_retries: Number.isFinite(retries) && retries >= 0 ? Math.floor(retries) : null,
+				auto_step_backoff_s: Number.isFinite(backoff) && backoff >= 0 ? backoff : null,
 			});
 			syncGlobalDrafts();
 			syncBriefOverrideDrafts();
@@ -999,11 +1039,18 @@
 			const maxFix = Number(briefMaxFixAttemptsDraft);
 			const parsedMaxFix =
 				Number.isFinite(maxFix) && maxFix >= 0 ? Math.floor(maxFix) : null;
+			const retries = Number(briefAutoStepRetriesDraft);
+			const parsedRetries =
+				Number.isFinite(retries) && retries >= 0 ? Math.floor(retries) : null;
+			const backoff = Number(briefAutoStepBackoffDraft);
+			const parsedBackoff = Number.isFinite(backoff) && backoff >= 0 ? backoff : null;
 			const updated = await patchBriefOutputSpecOverrides(selectedBrief.id, {
 				language: overrideLanguage ? briefLanguageDraft.trim() || null : null,
 				script_format: overrideScriptFormat ? briefScriptFormatDraft : null,
 				script_format_notes: overrideScriptNotes ? briefScriptNotesDraft : null,
 				max_fix_attempts: overrideMaxFixAttempts ? parsedMaxFix : null,
+				auto_step_retries: overrideAutoStepRetries ? parsedRetries : null,
+				auto_step_backoff_s: overrideAutoStepBackoff ? parsedBackoff : null,
 			});
 			selectedBrief = updated;
 			await refreshAll();
@@ -1021,6 +1068,8 @@
 		overrideScriptFormat = false;
 		overrideScriptNotes = false;
 		overrideMaxFixAttempts = false;
+		overrideAutoStepRetries = false;
+		overrideAutoStepBackoff = false;
 		await saveBriefPrefs();
 	}
 
@@ -2233,6 +2282,28 @@
 										disabled={savingGlobalPrefs}
 									/>
 								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">自动跑 step 重试次数（default）</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										type="number"
+										min="0"
+										step="1"
+										bind:value={globalAutoStepRetriesDraft}
+										disabled={savingGlobalPrefs}
+									/>
+								</label>
+								<label class="block">
+									<div class="mb-1 text-[10px] text-zinc-500">自动跑 step 重试 backoff（秒，default）</div>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										type="number"
+										min="0"
+										step="0.5"
+										bind:value={globalAutoStepBackoffDraft}
+										disabled={savingGlobalPrefs}
+									/>
+								</label>
 								<button
 									class="w-full rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
 									onclick={saveGlobalPrefs}
@@ -2298,7 +2369,8 @@
 								{#if effective}
 									<div class="mb-2 text-[11px] text-zinc-500">
 										Effective：{effective.language} · {effective.script_format}
-										· 自动修复 {effective.max_fix_attempts} 次
+										· 自动修复 {effective.max_fix_attempts} 次 · step 重试{' '}
+										{effective.auto_step_retries} 次 · backoff {effective.auto_step_backoff_s}s
 										{#if effective.script_format_notes}
 											· {effective.script_format_notes}
 										{/if}
@@ -2362,6 +2434,36 @@
 										step="1"
 										bind:value={briefMaxFixAttemptsDraft}
 										disabled={!overrideMaxFixAttempts || savingBriefPrefs}
+									/>
+								</div>
+
+								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
+									<label class="flex items-center gap-2 text-zinc-200">
+										<input type="checkbox" bind:checked={overrideAutoStepRetries} />
+										<span>覆盖 step 重试次数</span>
+									</label>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
+										type="number"
+										min="0"
+										step="1"
+										bind:value={briefAutoStepRetriesDraft}
+										disabled={!overrideAutoStepRetries || savingBriefPrefs}
+									/>
+								</div>
+
+								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
+									<label class="flex items-center gap-2 text-zinc-200">
+										<input type="checkbox" bind:checked={overrideAutoStepBackoff} />
+										<span>覆盖 step backoff（秒）</span>
+									</label>
+									<input
+										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
+										type="number"
+										min="0"
+										step="0.5"
+										bind:value={briefAutoStepBackoffDraft}
+										disabled={!overrideAutoStepBackoff || savingBriefPrefs}
 									/>
 								</div>
 							</div>

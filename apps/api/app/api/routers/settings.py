@@ -42,6 +42,10 @@ async def patch_output_spec_defaults_route(
         patch["script_format_notes"] = payload.script_format_notes
     if "max_fix_attempts" in payload.model_fields_set:
         patch["max_fix_attempts"] = payload.max_fix_attempts
+    if "auto_step_retries" in payload.model_fields_set:
+        patch["auto_step_retries"] = payload.auto_step_retries
+    if "auto_step_backoff_s" in payload.model_fields_set:
+        patch["auto_step_backoff_s"] = payload.auto_step_backoff_s
 
     resolved = await patch_output_spec_defaults(session=session, patch=patch)
     return OutputSpecDefaultsRead.model_validate(resolved)

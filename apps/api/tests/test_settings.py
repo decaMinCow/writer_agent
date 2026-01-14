@@ -9,6 +9,8 @@ async def test_output_spec_defaults_get_and_patch(client):
     assert body["script_format"] == "screenplay_int_ext"
     assert body["script_format_notes"] is None
     assert body["max_fix_attempts"] == 2
+    assert body["auto_step_retries"] == 3
+    assert isinstance(body["auto_step_backoff_s"], (int, float))
 
     patched = await client.patch(
         "/api/settings/output-spec",
@@ -17,6 +19,8 @@ async def test_output_spec_defaults_get_and_patch(client):
             "script_format": "stage_play",
             "script_format_notes": "偏舞台剧",
             "max_fix_attempts": 3,
+            "auto_step_retries": 7,
+            "auto_step_backoff_s": 0.0,
         },
     )
     assert patched.status_code == 200
@@ -25,6 +29,8 @@ async def test_output_spec_defaults_get_and_patch(client):
     assert patched_body["script_format"] == "stage_play"
     assert patched_body["script_format_notes"] == "偏舞台剧"
     assert patched_body["max_fix_attempts"] == 3
+    assert patched_body["auto_step_retries"] == 7
+    assert patched_body["auto_step_backoff_s"] == 0.0
 
     got2 = await client.get("/api/settings/output-spec")
     assert got2.status_code == 200
@@ -32,12 +38,19 @@ async def test_output_spec_defaults_get_and_patch(client):
     assert body2["language"] == "en-US"
     assert body2["script_format"] == "stage_play"
     assert body2["max_fix_attempts"] == 3
+    assert body2["auto_step_retries"] == 7
 
 
 async def test_snapshot_materializes_effective_output_spec(client):
     await client.patch(
         "/api/settings/output-spec",
-        json={"language": "en-US", "script_format": "stage_play", "script_format_notes": None},
+        json={
+            "language": "en-US",
+            "script_format": "stage_play",
+            "script_format_notes": None,
+            "auto_step_retries": 4,
+            "auto_step_backoff_s": 0.0,
+        },
     )
 
     brief = await client.post(
@@ -53,6 +66,8 @@ async def test_snapshot_materializes_effective_output_spec(client):
     assert snap_content["output_spec"]["language"] == "en-US"
     assert snap_content["output_spec"]["script_format"] == "screenplay_int_ext"
     assert snap_content["output_spec"]["max_fix_attempts"] == 2
+    assert snap_content["output_spec"]["auto_step_retries"] == 4
+    assert snap_content["output_spec"]["auto_step_backoff_s"] == 0.0
 
 
 async def test_patch_output_spec_can_clear_overrides(client):

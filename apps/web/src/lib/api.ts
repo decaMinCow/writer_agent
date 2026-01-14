@@ -34,6 +34,8 @@ export type OutputSpecDefaults = {
 	script_format: ScriptFormat;
 	script_format_notes: string | null;
 	max_fix_attempts: number;
+	auto_step_retries: number;
+	auto_step_backoff_s: number;
 	[key: string]: unknown;
 };
 
@@ -256,6 +258,8 @@ export async function patchGlobalOutputSpecDefaults(payload: {
 	script_format?: ScriptFormat | null;
 	script_format_notes?: string | null;
 	max_fix_attempts?: number | null;
+	auto_step_retries?: number | null;
+	auto_step_backoff_s?: number | null;
 }): Promise<OutputSpecDefaults> {
 	return await fetchJson<OutputSpecDefaults>('/api/settings/output-spec', {
 		method: 'PATCH',
@@ -288,6 +292,8 @@ export async function patchBriefOutputSpecOverrides(
 		script_format?: ScriptFormat | null;
 		script_format_notes?: string | null;
 		max_fix_attempts?: number | null;
+		auto_step_retries?: number | null;
+		auto_step_backoff_s?: number | null;
 	},
 ): Promise<BriefRead> {
 	return await fetchJson<BriefRead>(`/api/briefs/${briefId}/output-spec`, {

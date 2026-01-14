@@ -17,6 +17,8 @@ SERVER_OUTPUT_SPEC_DEFAULTS: dict[str, Any] = {
     "script_format": ScriptFormat.screenplay_int_ext.value,
     "script_format_notes": None,
     "max_fix_attempts": 2,
+    "auto_step_retries": 3,
+    "auto_step_backoff_s": 1.0,
 }
 
 
@@ -47,6 +49,24 @@ async def get_output_spec_defaults(*, session: AsyncSession) -> dict[str, Any]:
     if max_fix_attempts < 0:
         max_fix_attempts = 0
     resolved["max_fix_attempts"] = max_fix_attempts
+
+    raw_retries = resolved.get("auto_step_retries")
+    try:
+        auto_step_retries = int(raw_retries)
+    except (TypeError, ValueError):
+        auto_step_retries = int(SERVER_OUTPUT_SPEC_DEFAULTS["auto_step_retries"])
+    if auto_step_retries < 0:
+        auto_step_retries = 0
+    resolved["auto_step_retries"] = auto_step_retries
+
+    raw_backoff = resolved.get("auto_step_backoff_s")
+    try:
+        auto_step_backoff_s = float(raw_backoff)
+    except (TypeError, ValueError):
+        auto_step_backoff_s = float(SERVER_OUTPUT_SPEC_DEFAULTS["auto_step_backoff_s"])
+    if auto_step_backoff_s < 0:
+        auto_step_backoff_s = 0.0
+    resolved["auto_step_backoff_s"] = auto_step_backoff_s
 
     return resolved
 

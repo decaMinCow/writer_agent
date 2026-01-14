@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -27,13 +30,106 @@ from app.schemas.workflows import (
     WorkflowStepRunRead,
 )
 from app.services import cascade_delete
+from app.services.error_utils import format_exception_chain
 from app.services.json_utils import deep_merge
 from app.services.llm_provider import resolve_llm_and_embeddings, resolve_llm_client
 from app.services.workflow_events import WorkflowEventHub, format_sse_event
+from app.services.workflow_executor import execute_next_step
 from app.services.workflow_intervention import build_workflow_intervention
-from app.services.workflow_step_runner import execute_one_step
+from app.services.workflow_step_runner import determine_step_name, execute_one_step
 
 router = APIRouter(prefix="/api/workflow-runs", tags=["workflows"])
+
+_ERROR_CODE_RE = re.compile(r"Error code:\s*(\d+)")
+
+
+def _output_spec_from_snapshot(snapshot: BriefSnapshot | None) -> dict[str, Any]:
+    if snapshot is None:
+        return {}
+    content = snapshot.content
+    if not isinstance(content, dict):
+        return {}
+    output_spec = content.get("output_spec")
+    if not isinstance(output_spec, dict):
+        return {}
+    return dict(output_spec)
+
+
+def _coerce_int(value: object, *, default: int, min_value: int = 0) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, parsed)
+
+
+def _coerce_float(value: object, *, default: float, min_value: float = 0.0) -> float:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, parsed)
+
+
+def _resolve_autorun_retry_policy(*, snapshot: BriefSnapshot | None) -> tuple[int, float]:
+    output_spec = _output_spec_from_snapshot(snapshot)
+    retries = _coerce_int(output_spec.get("auto_step_retries"), default=3, min_value=0)
+    backoff_s = _coerce_float(output_spec.get("auto_step_backoff_s"), default=1.0, min_value=0.0)
+    return retries, backoff_s
+
+
+def _is_retryable_step_failure(*, run_error: dict[str, Any] | None, step_error: str | None) -> bool:
+    if not isinstance(run_error, dict):
+        return False
+
+    detail = str(run_error.get("detail") or "")
+    if detail in {"hard_check_failed", "max_fix_attempts_exceeded"}:
+        return False
+
+    error_type = str(run_error.get("error_type") or "")
+    if error_type in {"APIConnectionError", "APITimeoutError"}:
+        return True
+    if error_type in {"JSONDecodeError", "ValidationError"}:
+        return True
+    if error_type == "ValueError":
+        msg = str(run_error.get("error") or "")
+        if "expected_json_object" in msg:
+            return True
+
+    chain = str(run_error.get("error_chain") or step_error or "")
+    if "SSLEOFError" in chain or "UNEXPECTED_EOF_WHILE_READING" in chain:
+        return True
+    if "RemoteProtocolError" in chain or "EndOfStream" in chain:
+        return True
+
+    if error_type == "APIStatusError" or "APIStatusError" in chain:
+        match = _ERROR_CODE_RE.search(chain) or _ERROR_CODE_RE.search(str(run_error.get("error") or ""))
+        if match:
+            try:
+                code = int(match.group(1))
+            except ValueError:
+                code = 0
+            if code in {408, 409, 429, 500, 502, 503, 504}:
+                return True
+
+    return False
+
+
+def _autorun_retry_state(state: dict[str, Any]) -> dict[str, Any]:
+    blob = state.get("_autorun_retry")
+    if isinstance(blob, dict):
+        return blob
+    blob = {}
+    state["_autorun_retry"] = blob
+    return blob
+
+
+def _compute_backoff_delay_s(*, base_backoff_s: float, attempt: int, cap_s: float = 30.0) -> float:
+    if base_backoff_s <= 0:
+        return 0.0
+    if attempt <= 1:
+        return min(cap_s, base_backoff_s)
+    return min(cap_s, base_backoff_s * (2 ** (attempt - 1)))
 
 
 @router.post("", response_model=WorkflowRunRead)
@@ -468,6 +564,7 @@ async def _autorun_loop(app: FastAPI, *, run_id: uuid.UUID, stop_event: asyncio.
 
     try:
         while not stop_event.is_set():
+            retry_delay_s: float | None = None
             async with sessionmaker() as session:
                 run = await session.get(WorkflowRun, run_id)
                 if not run:
@@ -477,31 +574,218 @@ async def _autorun_loop(app: FastAPI, *, run_id: uuid.UUID, stop_event: asyncio.
                 if run.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
                     return
 
+                snapshot = await session.get(BriefSnapshot, run.brief_snapshot_id)
+                max_step_retries, backoff_s = _resolve_autorun_retry_policy(snapshot=snapshot)
+
                 llm, embeddings, meta = await resolve_llm_and_embeddings(session=session, app=app)
                 if llm is None or embeddings is None:
                     return
 
-                await execute_one_step(
-                    session=session,
-                    llm=llm,
-                    embeddings=embeddings,
-                    run=run,
-                    hub=hub,
+                if run.status == RunStatus.queued:
+                    run.status = RunStatus.running
+                    await session.commit()
+                    await session.refresh(run)
+                    if hub is not None:
+                        await hub.publish(
+                            run_id=run.id,
+                            name="run",
+                            payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+                        )
+
+                step_name = str(determine_step_name(run))
+                next_index = await session.scalar(
+                    select(func.count())
+                    .select_from(WorkflowStepRun)
+                    .where(WorkflowStepRun.workflow_run_id == run.id)
                 )
-                await session.refresh(run)
-                if run.status == RunStatus.failed and isinstance(run.error, dict):
-                    effective = meta.get("effective")
-                    if isinstance(effective, dict):
-                        run.error = deep_merge(dict(run.error), {"provider": effective})
+                step_index = int(next_index or 0) + 1
+                now = datetime.now().astimezone()
+                step = WorkflowStepRun(
+                    workflow_run_id=run.id,
+                    step_name=step_name,
+                    step_index=step_index,
+                    status=RunStatus.running,
+                    outputs={},
+                    started_at=now,
+                )
+                session.add(step)
+                await session.commit()
+                await session.refresh(step)
+                if hub is not None:
+                    await hub.publish(
+                        run_id=run.id,
+                        name="step",
+                        payload={"step": WorkflowStepRunRead.model_validate(step).model_dump(mode="json")},
+                    )
+
+                run_error: dict[str, Any] | None = None
+                try:
+                    outputs = await execute_next_step(
+                        session=session,
+                        llm=llm,
+                        embeddings=embeddings,
+                        run=run,
+                        hub=hub,
+                        step_id=step.id,
+                    )
+                    step.outputs = outputs
+                    step.finished_at = datetime.now().astimezone()
+
+                    if run.status == RunStatus.failed:
+                        run_error = run.error if isinstance(run.error, dict) else None
+                        step.status = RunStatus.failed
+                        if run_error is not None:
+                            step.error = json.dumps(run_error, ensure_ascii=False)
+                    else:
+                        step.status = RunStatus.succeeded
+                except Exception as exc:
+                    step.finished_at = datetime.now().astimezone()
+                    step.status = RunStatus.failed
+                    step.outputs = {}
+                    step.error = format_exception_chain(exc)
+                    run_error = {
+                        "detail": "step_failed",
+                        "step_name": step_name,
+                        "step_index": step_index,
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                        "error_chain": step.error,
+                    }
+
+                if step.status == RunStatus.failed and run_error is not None:
+                    state: dict[str, Any] = copy.deepcopy(run.state or {})
+                    retry_state = _autorun_retry_state(state)
+                    prev_step_name = str(retry_state.get("step_name") or "")
+                    if prev_step_name != step_name:
+                        retry_state.clear()
+                        retry_state["step_name"] = step_name
+                        retry_state["attempt"] = 0
+
+                    attempt = int(retry_state.get("attempt") or 0) + 1
+                    retry_state["attempt"] = attempt
+
+                    retryable = _is_retryable_step_failure(run_error=run_error, step_error=step.error)
+
+                    if retryable and attempt <= max_step_retries:
+                        retry_delay_s = _compute_backoff_delay_s(base_backoff_s=backoff_s, attempt=attempt)
+                        run.status = RunStatus.queued
+                        run.error = None
+                        run.state = state
+
                         await session.commit()
                         await session.refresh(run)
+                        await session.refresh(step)
+
                         if hub is not None:
+                            await hub.publish(
+                                run_id=run.id,
+                                name="step",
+                                payload={
+                                    "step": WorkflowStepRunRead.model_validate(step).model_dump(mode="json")
+                                },
+                            )
                             await hub.publish(
                                 run_id=run.id,
                                 name="run",
                                 payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
                             )
-            await asyncio.sleep(0)
+                            await hub.publish(
+                                run_id=run.id,
+                                name="log",
+                                payload={
+                                    "message": f"autorun_retry_scheduled step={step_name} attempt={attempt}/{max_step_retries} delay_s={retry_delay_s}"
+                                },
+                            )
+                        continue
+
+                    run.status = RunStatus.failed
+                    effective = meta.get("effective")
+                    if isinstance(effective, dict):
+                        run_error = deep_merge(dict(run_error), {"provider": effective})
+                    if retryable and attempt > max_step_retries:
+                        run_error = deep_merge(
+                            dict(run_error),
+                            {
+                                "autorun_retry_exhausted": True,
+                                "autorun_retry_attempts": attempt,
+                                "autorun_retry_limit": max_step_retries,
+                            },
+                        )
+
+                    run.error = run_error
+                    run.state = state
+                    await session.commit()
+                    await session.refresh(run)
+                    await session.refresh(step)
+
+                    if hub is not None:
+                        await hub.publish(
+                            run_id=run.id,
+                            name="step",
+                            payload={"step": WorkflowStepRunRead.model_validate(step).model_dump(mode="json")},
+                        )
+                        await hub.publish(
+                            run_id=run.id,
+                            name="run",
+                            payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+                        )
+                        reason = "not_retryable" if not retryable else "retry_limit_exhausted"
+                        await hub.publish(
+                            run_id=run.id,
+                            name="log",
+                            payload={
+                                "message": f"autorun_stopped_on_failure step={step_name} attempt={attempt}/{max_step_retries} reason={reason}"
+                            },
+                        )
+                    return
+
+                if step.status == RunStatus.failed and run_error is None:
+                    run.status = RunStatus.failed
+                    run.error = {"detail": "step_failed", "step_name": step_name, "step_index": step_index}
+                    await session.commit()
+                    await session.refresh(run)
+                    await session.refresh(step)
+                    if hub is not None:
+                        await hub.publish(
+                            run_id=run.id,
+                            name="step",
+                            payload={"step": WorkflowStepRunRead.model_validate(step).model_dump(mode="json")},
+                        )
+                        await hub.publish(
+                            run_id=run.id,
+                            name="run",
+                            payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+                        )
+                    return
+
+                state: dict[str, Any] = copy.deepcopy(run.state or {})
+                if "_autorun_retry" in state:
+                    state.pop("_autorun_retry", None)
+                    run.state = state
+                await session.commit()
+                await session.refresh(run)
+                await session.refresh(step)
+                if hub is not None:
+                    await hub.publish(
+                        run_id=run.id,
+                        name="step",
+                        payload={"step": WorkflowStepRunRead.model_validate(step).model_dump(mode="json")},
+                    )
+                    await hub.publish(
+                        run_id=run.id,
+                        name="run",
+                        payload={"run": WorkflowRunRead.model_validate(run).model_dump(mode="json")},
+                    )
+
+            if retry_delay_s is None:
+                await asyncio.sleep(0)
+            elif retry_delay_s <= 0:
+                await asyncio.sleep(0)
+            else:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=retry_delay_s)
+                except asyncio.TimeoutError:
+                    pass
     except asyncio.CancelledError:
         return
     except Exception as exc:

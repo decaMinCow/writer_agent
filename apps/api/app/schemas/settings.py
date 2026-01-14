@@ -12,6 +12,8 @@ class OutputSpecDefaultsRead(BaseModel):
     script_format: ScriptFormat
     script_format_notes: str | None = None
     max_fix_attempts: int
+    auto_step_retries: int
+    auto_step_backoff_s: float
 
 
 class OutputSpecDefaultsPatch(BaseModel):
@@ -21,6 +23,8 @@ class OutputSpecDefaultsPatch(BaseModel):
     script_format: ScriptFormat | None = None
     script_format_notes: str | None = None
     max_fix_attempts: int | None = None
+    auto_step_retries: int | None = None
+    auto_step_backoff_s: float | None = None
 
 
 class LlmProviderSettingsRead(BaseModel):

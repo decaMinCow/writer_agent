@@ -325,6 +325,18 @@ async def patch_output_spec(
         else:
             output_spec["max_fix_attempts"] = payload.max_fix_attempts
 
+    if "auto_step_retries" in payload.model_fields_set:
+        if payload.auto_step_retries is None:
+            output_spec.pop("auto_step_retries", None)
+        else:
+            output_spec["auto_step_retries"] = payload.auto_step_retries
+
+    if "auto_step_backoff_s" in payload.model_fields_set:
+        if payload.auto_step_backoff_s is None:
+            output_spec.pop("auto_step_backoff_s", None)
+        else:
+            output_spec["auto_step_backoff_s"] = payload.auto_step_backoff_s
+
     content["output_spec"] = output_spec
     brief.content = content
 
