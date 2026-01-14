@@ -1,20 +1,6 @@
-# novel-to-script Specification
+# novel-to-script — Delta (add-novel-to-script-conversion-config)
 
-## Purpose
-TBD - created by archiving change add-novel-to-script-workflow. Update Purpose after archive.
-## Requirements
-### Requirement: Convert committed novel chapters into committed script scenes
-The system SHALL convert committed novel chapter artifacts into committed script scene artifacts using a stepwise workflow.
-
-#### Scenario: Scene list derived from novel source
-- **GIVEN** a brief snapshot has committed novel chapter versions
-- **WHEN** a novel→script workflow run starts
-- **THEN** the system SHALL generate and persist a structured `scene_list`
-
-#### Scenario: Commit a scene with fidelity gating
-- **WHEN** a scene is drafted and evaluated
-- **THEN** the system SHALL block commit if hard fidelity constraints fail
-- **AND** the system SHALL attempt targeted fixes before failing the run
+## MODIFIED Requirements
 
 ### Requirement: Select source chapters from the same snapshot
 The system SHALL use committed novel chapters associated with the same `brief_snapshot_id` as the workflow run, unless an explicit source snapshot is provided for the run.

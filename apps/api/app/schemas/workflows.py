@@ -7,11 +7,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models import RunStatus, WorkflowKind
+from app.schemas.briefs import OutputSpecOverrides
 
 
 class WorkflowRunCreate(BaseModel):
     kind: WorkflowKind
     brief_snapshot_id: uuid.UUID
+    source_brief_snapshot_id: uuid.UUID | None = None
+    conversion_output_spec: OutputSpecOverrides | None = None
     status: RunStatus = Field(default=RunStatus.queued)
     state: dict[str, Any] = Field(default_factory=dict)
 

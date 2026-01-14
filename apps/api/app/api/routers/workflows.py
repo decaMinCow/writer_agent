@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from app.db.models import BriefSnapshot, RunStatus, WorkflowRun, WorkflowStepRun
+from app.db.models import BriefSnapshot, RunStatus, WorkflowKind, WorkflowRun, WorkflowStepRun
 from app.db.session import get_db_session
 from app.schemas.workflow_execution import WorkflowControlResponse, WorkflowNextResponse
 from app.schemas.workflow_interventions import (
@@ -41,6 +41,19 @@ from app.services.workflow_step_runner import determine_step_name, execute_one_s
 router = APIRouter(prefix="/api/workflow-runs", tags=["workflows"])
 
 _ERROR_CODE_RE = re.compile(r"Error code:\s*(\d+)")
+
+
+def _reset_failed_cursor_phase(state: dict[str, Any]) -> dict[str, Any]:
+    cursor = state.get("cursor")
+    if not isinstance(cursor, dict):
+        return state
+    if cursor.get("phase") != "failed":
+        return state
+    next_cursor = dict(cursor)
+    next_cursor.pop("phase", None)
+    next_state = dict(state)
+    next_state["cursor"] = next_cursor
+    return next_state
 
 
 def _output_spec_from_snapshot(snapshot: BriefSnapshot | None) -> dict[str, Any]:
@@ -141,11 +154,29 @@ async def create_workflow_run(
     if not snapshot:
         raise HTTPException(status_code=404, detail="brief_snapshot_not_found")
 
+    state: dict[str, Any] = dict(payload.state or {})
+    if payload.kind == WorkflowKind.novel_to_script:
+        if payload.source_brief_snapshot_id is not None:
+            source = await session.get(BriefSnapshot, payload.source_brief_snapshot_id)
+            if not source:
+                raise HTTPException(status_code=404, detail="source_snapshot_not_found")
+            if source.brief_id != snapshot.brief_id:
+                raise HTTPException(status_code=400, detail="source_snapshot_not_in_same_brief")
+            state["novel_source_snapshot_id"] = str(source.id)
+
+        if payload.conversion_output_spec is not None:
+            overrides = payload.conversion_output_spec.model_dump(mode="json", exclude_none=True)
+            if overrides:
+                state["conversion_output_spec"] = overrides
+    else:
+        if payload.source_brief_snapshot_id is not None or payload.conversion_output_spec is not None:
+            raise HTTPException(status_code=400, detail="unsupported_workflow_inputs")
+
     run = WorkflowRun(
         kind=payload.kind,
         status=payload.status,
         brief_snapshot_id=snapshot.id,
-        state=payload.state,
+        state=state,
     )
     session.add(run)
     await session.commit()
@@ -312,6 +343,7 @@ async def fork_workflow_run(
 
     state: dict[str, Any] = dict(payload.state if payload.state is not None else (run.state or {}))
     state["forked_from"] = {"run_id": str(run.id), "step_id": str(payload.step_id) if payload.step_id else None}
+    state = _reset_failed_cursor_phase(state)
 
     forked = WorkflowRun(
         kind=run.kind,
@@ -525,6 +557,7 @@ async def execute_workflow_next(
     if run.status == RunStatus.failed:
         run.status = RunStatus.queued
         run.error = None
+        run.state = _reset_failed_cursor_phase(dict(run.state or {}))
         await session.commit()
         await session.refresh(run)
 
@@ -819,6 +852,7 @@ async def autorun_start(
     if run.status == RunStatus.failed:
         run.status = RunStatus.queued
         run.error = None
+        run.state = _reset_failed_cursor_phase(dict(run.state or {}))
         await session.commit()
         await session.refresh(run)
 

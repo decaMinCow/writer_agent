@@ -41,6 +41,14 @@ The system SHALL support a server-driven “autorun” mode that repeatedly exec
 - **WHEN** the user starts autorun
 - **THEN** the system SHALL execute steps sequentially until the run reaches a terminal status or is paused/canceled
 
+#### Scenario: Autorun auto-retries retryable failures
+- **GIVEN** autorun is running for a workflow run
+- **AND** the next step fails with a retryable error (e.g., transient connection error or output parse/validation error)
+- **WHEN** the system applies the autorun retry policy
+- **THEN** the system SHALL schedule a retry of the same step after a backoff delay
+- **AND** the system SHALL NOT require user intervention to continue autorun
+- **AND** the system SHALL stop autorun and leave the run in a failed state once the retry limit is exhausted
+
 ### Requirement: Stream workflow progress via SSE
 The system SHALL stream workflow progress updates to clients using Server-Sent Events (SSE).
 

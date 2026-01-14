@@ -130,6 +130,9 @@
 	let selectedStep: WorkflowStepRunRead | null = null;
 	let workflowKindDraft: WorkflowRunRead['kind'] = 'novel';
 	let creatingRun = false;
+	let ntsSourceSnapshotIdDraft = '';
+	let ntsConversionScriptFormatDraft: ScriptFormat = 'custom';
+	let ntsConversionNotesDraft = '';
 	let stepping = false;
 	let autoRunning = false;
 	let runEvents: EventSource | null = null;
@@ -434,6 +437,9 @@
 		selectedArtifact = null;
 		selectedSnapshot = null;
 		selectedStep = null;
+		ntsSourceSnapshotIdDraft = '';
+		ntsConversionScriptFormatDraft = 'custom';
+		ntsConversionNotesDraft = '';
 		workflowSteps = [];
 		artifactVersions = [];
 		selectedArtifactVersion = null;
@@ -861,6 +867,10 @@
 		}
 		selectedSnapshot = snap;
 		showSnapshotJson = false;
+		ntsSourceSnapshotIdDraft = snap.id;
+		const effective = effectiveOutputSpec();
+		ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
+		ntsConversionNotesDraft = effective?.script_format_notes ?? '';
 		await refreshAnalysis();
 	}
 
@@ -891,6 +901,10 @@
 			briefSnapshots = await listBriefSnapshots(selectedBrief.id);
 			selectedSnapshot = snap;
 			showSnapshotJson = false;
+			ntsSourceSnapshotIdDraft = snap.id;
+			const effective = effectiveOutputSpec();
+			ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
+			ntsConversionNotesDraft = effective?.script_format_notes ?? '';
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -1144,10 +1158,22 @@
 		error = null;
 		creatingRun = true;
 		try {
-			const run = await createWorkflowRun({
+			const payload: Parameters<typeof createWorkflowRun>[0] = {
 				kind: workflowKindDraft,
 				brief_snapshot_id: selectedSnapshot.id,
-			});
+			};
+			if (workflowKindDraft === 'novel_to_script') {
+				const sourceId = ntsSourceSnapshotIdDraft || selectedSnapshot.id;
+				payload.source_brief_snapshot_id = sourceId !== selectedSnapshot.id ? sourceId : null;
+				payload.conversion_output_spec = {
+					script_format: ntsConversionScriptFormatDraft,
+					script_format_notes: ntsConversionNotesDraft.trim()
+						? ntsConversionNotesDraft.trim()
+						: null,
+				};
+			}
+
+			const run = await createWorkflowRun(payload);
 			await refreshAll();
 			await selectRun(run);
 		} catch (e) {
@@ -1790,6 +1816,57 @@
 										创建
 									</button>
 								</div>
+
+								{#if selectedSnapshot && workflowKindDraft === 'novel_to_script'}
+									<div class="mt-3 space-y-2 text-xs">
+										<label class="block">
+											<div class="mb-1 text-[10px] text-zinc-500">小说来源版本（用于读取已生成小说）</div>
+											<select
+												class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200"
+												bind:value={ntsSourceSnapshotIdDraft}
+												disabled={creatingRun}
+											>
+												{#each briefSnapshots as snap (snap.id)}
+													<option value={snap.id}>
+														{snap.label ?? '（未命名）'} · {new Date(snap.created_at).toLocaleString()}
+													</option>
+												{/each}
+											</select>
+											<div class="mt-1 text-[10px] text-zinc-500">
+												提示：可以选择“小说已生成完成”的旧版本；Run 仍会归档在当前选中 Snapshot 下。
+											</div>
+										</label>
+
+										<label class="block">
+											<div class="mb-1 text-[10px] text-zinc-500">转写格式（本次转写专用）</div>
+											<select
+												class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200"
+												bind:value={ntsConversionScriptFormatDraft}
+												disabled={creatingRun}
+											>
+												<option value="screenplay_int_ext">影视剧本（INT/EXT）</option>
+												<option value="stage_play">舞台剧</option>
+												<option value="custom">自定义</option>
+											</select>
+										</label>
+
+										<label class="block">
+											<div class="mb-1 text-[10px] text-zinc-500">
+												转写规范备注（建议粘贴短剧格式/流程/台词标准）
+											</div>
+											<textarea
+												class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+												rows="6"
+												placeholder="例如：先列关键剧情（STEP1），再写短剧剧本（STEP2）；每集 500–800 字；严格用 1-1/日夜/内外/地点/出场人物/△动作/台词/OS/OV/闪回…"
+												bind:value={ntsConversionNotesDraft}
+												disabled={creatingRun}
+											></textarea>
+											<div class="mt-1 text-[10px] text-zinc-500">
+												这会写入 run.state（conversion_output_spec），不会修改 Snapshot。
+											</div>
+										</label>
+									</div>
+								{/if}
 							</div>
 						{/if}
 

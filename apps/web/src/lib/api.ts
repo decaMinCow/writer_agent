@@ -488,6 +488,13 @@ export type WorkflowControlResponse = {
 export async function createWorkflowRun(payload: {
 	kind: WorkflowRunRead['kind'];
 	brief_snapshot_id: string;
+	source_brief_snapshot_id?: string | null;
+	conversion_output_spec?:
+		| {
+				script_format?: ScriptFormat | null;
+				script_format_notes?: string | null;
+		  }
+		| null;
 	state?: Record<string, unknown>;
 }): Promise<WorkflowRunRead> {
 	return await fetchJson<WorkflowRunRead>('/api/workflow-runs', {
@@ -495,6 +502,8 @@ export async function createWorkflowRun(payload: {
 		body: JSON.stringify({
 			kind: payload.kind,
 			brief_snapshot_id: payload.brief_snapshot_id,
+			source_brief_snapshot_id: payload.source_brief_snapshot_id ?? null,
+			conversion_output_spec: payload.conversion_output_spec ?? null,
 			state: payload.state ?? {},
 		}),
 	});

@@ -794,10 +794,52 @@ async def execute_next_step(
         phase = cursor.get("phase") or "nts_scene_list"
         scene_index = int(cursor.get("scene_index") or 1)
 
+        source_snapshot_id = snapshot.id
+        raw_source_snapshot_id = state.get("novel_source_snapshot_id")
+        if raw_source_snapshot_id is None:
+            existing_source = state.get("novel_source")
+            if isinstance(existing_source, dict):
+                raw_source_snapshot_id = existing_source.get("source_snapshot_id")
+        if raw_source_snapshot_id is not None:
+            try:
+                source_snapshot_id = uuid.UUID(str(raw_source_snapshot_id))
+            except (TypeError, ValueError):
+                run.status = RunStatus.failed
+                run.error = {"detail": "invalid_source_snapshot_id"}
+                cursor["phase"] = "failed"
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "invalid_source_snapshot_id"}
+
+        source_snapshot = snapshot
+        if source_snapshot_id != snapshot.id:
+            source_snapshot = await session.get(BriefSnapshot, source_snapshot_id)
+            if not source_snapshot:
+                run.status = RunStatus.failed
+                run.error = {"detail": "source_snapshot_not_found"}
+                cursor["phase"] = "failed"
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "source_snapshot_not_found"}
+            if source_snapshot.brief_id != snapshot.brief_id:
+                run.status = RunStatus.failed
+                run.error = {"detail": "source_snapshot_not_in_same_brief"}
+                cursor["phase"] = "failed"
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "source_snapshot_not_in_same_brief"}
+
+        output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
+        conversion_output_spec = state.get("conversion_output_spec")
+        if isinstance(conversion_output_spec, dict):
+            output_spec = deep_merge(output_spec, dict(conversion_output_spec))
+        brief_json_for_conversion = dict(brief_json) if isinstance(brief_json, dict) else {}
+        brief_json_for_conversion["output_spec"] = output_spec
+
         if phase == "nts_scene_list":
             sources = await _select_latest_novel_chapter_versions(
                 session=session,
-                brief_snapshot_id=snapshot.id,
+                brief_snapshot_id=source_snapshot.id,
             )
             if not sources:
                 run.status = RunStatus.failed
@@ -831,7 +873,11 @@ async def execute_next_step(
                 )
                 source_version_ids.append(str(version.id))
 
-            state["novel_source"] = {"artifact_version_ids": source_version_ids, "chapter_digests": digests}
+            state["novel_source"] = {
+                "source_snapshot_id": str(source_snapshot.id),
+                "artifact_version_ids": source_version_ids,
+                "chapter_digests": digests,
+            }
 
             raw = await _llm_complete_with_optional_stream(
                 llm=llm,
@@ -839,7 +885,7 @@ async def execute_next_step(
                 user_prompt=render_prompt(
                     load_prompt("nts_scene_list_user.md"),
                     {
-                        "BRIEF_JSON": json.dumps(brief_json, ensure_ascii=False, indent=2),
+                        "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
                         "NOVEL_CHAPTER_DIGESTS_JSON": json.dumps(
                             digests, ensure_ascii=False, indent=2
                         ),
@@ -877,7 +923,6 @@ async def execute_next_step(
         digest_lines = _novel_digest_lines(chapter_digests)
 
         if phase == "nts_scene_draft":
-            output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
             query = f"NTS Scene {scene.slug} {scene.title} {scene.location} {scene.time} {' '.join(scene.characters)} {scene.purpose}"
             evidence_chunks = []
             if not _rag_is_disabled(state):
@@ -885,7 +930,7 @@ async def execute_next_step(
                     evidence_chunks = await retrieve_evidence(
                         session=session,
                         embeddings=embeddings,
-                        brief_snapshot_id=snapshot.id,
+                        brief_snapshot_id=source_snapshot.id,
                         query=query,
                         limit=8,
                     )
@@ -901,7 +946,7 @@ async def execute_next_step(
                 user_prompt=render_prompt(
                     load_prompt("nts_scene_draft_user.md"),
                     {
-                        "BRIEF_JSON": json.dumps(brief_json, ensure_ascii=False, indent=2),
+                        "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
                         "CURRENT_STATE_JSON": json.dumps(current_state, ensure_ascii=False, indent=2),
                         "SCENE_JSON": json.dumps(
                             deep_merge(scene.model_dump(mode="json"), {"output_spec": output_spec}),
@@ -936,7 +981,7 @@ async def execute_next_step(
                     evidence_chunks = await retrieve_evidence(
                         session=session,
                         embeddings=embeddings,
-                        brief_snapshot_id=snapshot.id,
+                        brief_snapshot_id=source_snapshot.id,
                         query=query,
                         limit=8,
                     )
@@ -952,7 +997,7 @@ async def execute_next_step(
                 user_prompt=render_prompt(
                     load_prompt("nts_critic_user.md"),
                     {
-                        "BRIEF_JSON": json.dumps(brief_json, ensure_ascii=False, indent=2),
+                        "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
                         "CURRENT_STATE_JSON": json.dumps(current_state, ensure_ascii=False, indent=2),
                         "NUMBERED_PARAGRAPHS": numbered or "(empty)",
                         "EVIDENCE_TEXT": evidence_text or "(none)",
