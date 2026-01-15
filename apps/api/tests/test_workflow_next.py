@@ -152,6 +152,59 @@ async def test_script_workflow_next_happy_path(client_with_llm_and_embeddings, l
     assert done.json()["run"]["status"] == "succeeded"
 
 
+async def test_script_workflow_uses_prompt_preset_text(client_with_llm_and_embeddings, llm_stub):
+    patched = await client_with_llm_and_embeddings.patch(
+        "/api/settings/prompt-presets",
+        json={
+            "script": {
+                "default_preset_id": "default",
+                "presets": [{"id": "default", "name": "默认", "text": "SCRIPT_PRESET_NOTES"}],
+            }
+        },
+    )
+    assert patched.status_code == 200
+
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={"title": "测试剧本", "content": {"output_spec": {"script_format": "screenplay_int_ext"}}},
+    )
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief.json()['id']}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={"kind": "script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "夜里来电",
+                        "location": "公寓客厅",
+                        "time": "夜",
+                        "characters": ["主角"],
+                        "purpose": "引入悬念。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    llm_stub.outputs.append(json.dumps({"text": "INT. 公寓客厅 - 夜\n\n主角接起电话。"}, ensure_ascii=False))
+
+    await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    step2 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step2.status_code == 200
+    assert llm_stub.calls
+    prompt = llm_stub.calls[-1]["user_prompt"]
+    assert "SCRIPT_PRESET_NOTES" in prompt
+
+
 async def test_novel_workflow_includes_memory_evidence(client_with_llm_and_embeddings, llm_stub):
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
@@ -300,8 +353,13 @@ async def test_novel_to_script_prefers_snapshot_notes_over_global_when_run_notes
     client_with_llm_and_embeddings, llm_stub
 ):
     patched = await client_with_llm_and_embeddings.patch(
-        "/api/settings/novel-to-script-prompt",
-        json={"conversion_notes": "GLOBAL NTS RULES"},
+        "/api/settings/prompt-presets",
+        json={
+            "novel_to_script": {
+                "default_preset_id": "default",
+                "presets": [{"id": "default", "name": "默认", "text": "GLOBAL PRESET RULES"}],
+            }
+        },
     )
     assert patched.status_code == 200
 
@@ -365,16 +423,21 @@ async def test_novel_to_script_prefers_snapshot_notes_over_global_when_run_notes
     assert resp.status_code == 200
     assert llm_stub.calls
     prompt = llm_stub.calls[-1]["user_prompt"]
-    assert "SNAPSHOT NOTES" in prompt
-    assert "GLOBAL NTS RULES" not in prompt
+    assert "SNAPSHOT NOTES" not in prompt
+    assert "GLOBAL PRESET RULES" in prompt
 
 
 async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_and_run_notes_missing(
     client_with_llm_and_embeddings, llm_stub
 ):
     patched = await client_with_llm_and_embeddings.patch(
-        "/api/settings/novel-to-script-prompt",
-        json={"conversion_notes": "GLOBAL NTS RULES"},
+        "/api/settings/prompt-presets",
+        json={
+            "novel_to_script": {
+                "default_preset_id": "default",
+                "presets": [{"id": "default", "name": "默认", "text": "GLOBAL PRESET RULES"}],
+            }
+        },
     )
     assert patched.status_code == 200
 
@@ -438,7 +501,86 @@ async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_an
     assert resp.status_code == 200
     assert llm_stub.calls
     prompt = llm_stub.calls[-1]["user_prompt"]
-    assert "GLOBAL NTS RULES" in prompt
+    assert "GLOBAL PRESET RULES" in prompt
+
+
+async def test_novel_to_script_prompt_preset_id_overrides_global_default(client_with_llm_and_embeddings, llm_stub):
+    patched = await client_with_llm_and_embeddings.patch(
+        "/api/settings/prompt-presets",
+        json={
+            "novel_to_script": {
+                "default_preset_id": "a",
+                "presets": [
+                    {"id": "a", "name": "A", "text": "A_TEXT"},
+                    {"id": "b", "name": "B", "text": "B_TEXT"},
+                ],
+            }
+        },
+    )
+    assert patched.status_code == 200
+
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}},
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "prompt_preset_id": "b",
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
+    )
+    assert run.status_code == 200
+    assert run.json()["state"]["prompt_preset_id"] == "b"
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "夜里来电",
+                        "location": "公寓客厅",
+                        "time": "夜",
+                        "characters": ["主角"],
+                        "purpose": "引入悬念。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    assert llm_stub.calls
+    prompt = llm_stub.calls[-1]["user_prompt"]
+    assert "B_TEXT" in prompt
+    assert "A_TEXT" not in prompt
 
 
 async def test_novel_to_script_format_guard_triggers_fix_when_multiple_scene_blocks_present(
@@ -1177,6 +1319,17 @@ async def test_novel_to_script_critic_allows_null_rewrite_instructions(client_wi
 
 
 async def test_novel_to_script_conversion_output_spec_overrides_snapshot(client_with_llm_and_embeddings, llm_stub):
+    patched = await client_with_llm_and_embeddings.patch(
+        "/api/settings/prompt-presets",
+        json={
+            "novel_to_script": {
+                "default_preset_id": "default",
+                "presets": [{"id": "default", "name": "默认", "text": "PRESET_NOTES"}],
+            }
+        },
+    )
+    assert patched.status_code == 200
+
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={"title": "测试作品", "content": {"output_spec": {"script_format": "stage_play"}}},
@@ -1244,7 +1397,8 @@ async def test_novel_to_script_conversion_output_spec_overrides_snapshot(client_
     assert llm_stub.calls
     draft_prompt = llm_stub.calls[-1]["user_prompt"]
     assert '"script_format": "custom"' in draft_prompt
-    assert "PUA_TEST_NOTES" in draft_prompt
+    assert "PUA_TEST_NOTES" not in draft_prompt
+    assert "PRESET_NOTES" in draft_prompt
 
 
 async def test_create_novel_to_script_rejects_cross_brief_source_snapshot(client):

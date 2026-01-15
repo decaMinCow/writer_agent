@@ -50,16 +50,25 @@ The system SHALL use committed novel chapters associated with the same `brief_sn
 - **THEN** the system SHALL fail with an actionable error indicating novel sources are missing
 
 ### Requirement: Honor script format preference for novel→script
-The system MUST format generated scenes according to `brief_snapshot.content.output_spec.script_format`, unless an explicit `conversion_output_spec` is configured for the run.
+The system MUST format novel→script outputs using a resolved output specification and prompt preset rules.
 
 For `script_format_notes`, the system MUST apply the following precedence:
-`conversion_output_spec.script_format_notes` > `brief_snapshot.content.output_spec.script_format_notes` > global novel→script prompt defaults.
+`workflow_runs.state.prompt_preset_id` (resolved to preset text) > global default novel→script preset text.
+
+The system MUST NOT use Snapshot/Brief `output_spec.script_format_notes` as novel→script conversion rules.
 
 #### Scenario: Script format applied in novel→script
 - **WHEN** the workflow drafts an episode/script unit
-- **THEN** the output SHALL follow the configured script format preference
+- **THEN** the output SHALL follow the resolved script format preference
 
-#### Scenario: Run-level conversion output spec overrides snapshot output spec
-- **GIVEN** a novel→script workflow run is configured with a `conversion_output_spec`
+#### Scenario: Run-level prompt preset overrides the global default
+- **GIVEN** a novel→script workflow run is configured with `state.prompt_preset_id`
 - **WHEN** the workflow drafts an episode/script unit
-- **THEN** the output SHALL follow `conversion_output_spec.script_format` and related notes
+- **THEN** the workflow SHALL resolve the preset id within the global novel→script preset catalog
+- **AND** the workflow SHALL use the resolved preset text as `output_spec.script_format_notes`
+
+#### Scenario: Missing preset id falls back to global default
+- **GIVEN** a novel→script workflow run has no `state.prompt_preset_id`
+- **WHEN** the workflow drafts an episode/script unit
+- **THEN** the workflow SHALL use the global default novel→script preset text as `output_spec.script_format_notes`
+

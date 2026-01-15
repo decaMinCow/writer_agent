@@ -155,6 +155,8 @@ async def create_workflow_run(
         raise HTTPException(status_code=404, detail="brief_snapshot_not_found")
 
     state: dict[str, Any] = dict(payload.state or {})
+    prompt_preset_id = (payload.prompt_preset_id or "").strip() or None
+
     if payload.kind == WorkflowKind.novel_to_script:
         if payload.source_brief_snapshot_id is not None:
             source = await session.get(BriefSnapshot, payload.source_brief_snapshot_id)
@@ -168,8 +170,21 @@ async def create_workflow_run(
             overrides = payload.conversion_output_spec.model_dump(mode="json", exclude_none=True)
             if overrides:
                 state["conversion_output_spec"] = overrides
-    else:
+        if prompt_preset_id is not None:
+            state["prompt_preset_id"] = prompt_preset_id
+
+    elif payload.kind == WorkflowKind.script:
         if payload.source_brief_snapshot_id is not None or payload.conversion_output_spec is not None:
+            raise HTTPException(status_code=400, detail="unsupported_workflow_inputs")
+        if prompt_preset_id is not None:
+            state["prompt_preset_id"] = prompt_preset_id
+
+    else:
+        if (
+            payload.source_brief_snapshot_id is not None
+            or payload.conversion_output_spec is not None
+            or payload.prompt_preset_id is not None
+        ):
             raise HTTPException(status_code=400, detail="unsupported_workflow_inputs")
 
     run = WorkflowRun(

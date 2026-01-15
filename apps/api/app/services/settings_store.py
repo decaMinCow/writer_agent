@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,7 @@ from app.services.json_utils import deep_merge
 OUTPUT_SPEC_DEFAULTS_KEY = "output_spec_defaults"
 LLM_PROVIDER_SETTINGS_KEY = "llm_provider_settings"
 NOVEL_TO_SCRIPT_PROMPT_DEFAULTS_KEY = "novel_to_script_prompt_defaults"
+PROMPT_PRESETS_KEY = "prompt_presets"
 
 SERVER_OUTPUT_SPEC_DEFAULTS: dict[str, Any] = {
     "language": "zh-CN",
@@ -22,6 +24,21 @@ SERVER_OUTPUT_SPEC_DEFAULTS: dict[str, Any] = {
     "auto_step_backoff_s": 1.0,
 }
 
+SERVER_PROMPT_PRESETS_DEFAULTS: dict[str, Any] = {
+    "script": {
+        "default_preset_id": "default",
+        "presets": [
+            {"id": "default", "name": "默认", "text": ""},
+        ],
+    },
+    "novel_to_script": {
+        "default_preset_id": "default",
+        "presets": [
+            {"id": "default", "name": "默认", "text": ""},
+        ],
+    },
+}
+
 
 def _normalize_optional_str(value: object | None) -> str | None:
     if value is None:
@@ -30,6 +47,114 @@ def _normalize_optional_str(value: object | None) -> str | None:
         value = str(value)
     cleaned = value.strip()
     return cleaned or None
+
+
+def _normalize_prompt_preset_catalog(*, raw: object) -> dict[str, Any]:
+    catalog: dict[str, Any] = raw if isinstance(raw, dict) else {}
+
+    raw_presets = catalog.get("presets")
+    presets_list: list[dict[str, Any]] = []
+    if isinstance(raw_presets, list):
+        seen_ids: set[str] = set()
+        for item in raw_presets:
+            if not isinstance(item, dict):
+                continue
+            preset_id = _normalize_optional_str(item.get("id"))
+            if preset_id is None or preset_id in seen_ids:
+                continue
+            seen_ids.add(preset_id)
+            preset_name = _normalize_optional_str(item.get("name")) or preset_id
+            preset_text = item.get("text")
+            if preset_text is None:
+                preset_text = ""
+            if not isinstance(preset_text, str):
+                preset_text = str(preset_text)
+            presets_list.append(
+                {
+                    "id": preset_id,
+                    "name": preset_name,
+                    "text": preset_text,
+                }
+            )
+
+    default_preset_id = _normalize_optional_str(catalog.get("default_preset_id"))
+    if not presets_list:
+        return {"default_preset_id": None, "presets": []}
+
+    preset_ids = {preset["id"] for preset in presets_list}
+    if default_preset_id not in preset_ids:
+        default_preset_id = presets_list[0]["id"]
+
+    return {"default_preset_id": default_preset_id, "presets": presets_list}
+
+
+def _normalize_prompt_presets(*, raw: dict[str, Any]) -> dict[str, Any]:
+    merged = deep_merge(SERVER_PROMPT_PRESETS_DEFAULTS, raw)
+    return {
+        "script": _normalize_prompt_preset_catalog(raw=merged.get("script")),
+        "novel_to_script": _normalize_prompt_preset_catalog(raw=merged.get("novel_to_script")),
+    }
+
+
+async def get_prompt_presets(*, session: AsyncSession) -> dict[str, Any]:
+    setting = await session.get(AppSetting, PROMPT_PRESETS_KEY)
+    if setting is not None:
+        stored = dict(setting.value or {})
+        return _normalize_prompt_presets(raw=stored)
+
+    seeded = copy.deepcopy(SERVER_PROMPT_PRESETS_DEFAULTS)
+    legacy_output_spec = await session.get(AppSetting, OUTPUT_SPEC_DEFAULTS_KEY)
+    if legacy_output_spec is not None and isinstance(legacy_output_spec.value, dict):
+        legacy_notes = _normalize_optional_str(legacy_output_spec.value.get("script_format_notes"))
+        if legacy_notes is not None:
+            seeded["script"]["presets"][0]["text"] = legacy_notes
+
+    legacy_nts = await session.get(AppSetting, NOVEL_TO_SCRIPT_PROMPT_DEFAULTS_KEY)
+    if legacy_nts is not None and isinstance(legacy_nts.value, dict):
+        legacy_notes = _normalize_optional_str(legacy_nts.value.get("conversion_notes"))
+        if legacy_notes is not None:
+            seeded["novel_to_script"]["presets"][0]["text"] = legacy_notes
+
+    normalized = _normalize_prompt_presets(raw=seeded)
+    session.add(AppSetting(key=PROMPT_PRESETS_KEY, value=normalized))
+    await session.commit()
+    return normalized
+
+
+async def patch_prompt_presets(
+    *,
+    session: AsyncSession,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    setting = await session.get(AppSetting, PROMPT_PRESETS_KEY)
+    stored: dict[str, Any] = dict(setting.value or {}) if setting else {}
+
+    for top_key, top_value in patch.items():
+        if top_value is None:
+            stored.pop(top_key, None)
+            continue
+        if not isinstance(top_value, dict):
+            continue
+
+        existing_catalog = stored.get(top_key)
+        catalog: dict[str, Any] = dict(existing_catalog) if isinstance(existing_catalog, dict) else {}
+        for key, value in top_value.items():
+            if value is None:
+                catalog.pop(key, None)
+            else:
+                catalog[key] = value
+        stored[top_key] = catalog
+
+    normalized = _normalize_prompt_presets(raw=stored)
+
+    if setting is None:
+        setting = AppSetting(key=PROMPT_PRESETS_KEY, value=normalized)
+        session.add(setting)
+    else:
+        setting.value = normalized
+
+    await session.commit()
+    return normalized
 
 
 async def get_output_spec_defaults(*, session: AsyncSession) -> dict[str, Any]:

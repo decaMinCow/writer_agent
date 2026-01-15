@@ -38,7 +38,7 @@ from app.services.error_utils import format_exception_chain
 from app.services.json_utils import deep_merge
 from app.services.memory_store import index_artifact_version, retrieve_evidence
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
-from app.services.settings_store import get_novel_to_script_prompt_defaults
+from app.services.settings_store import get_prompt_presets
 from app.services.text_utils import apply_replacements, join_paragraphs, numbered_paragraphs
 from app.services.workflow_events import WorkflowEventHub
 
@@ -106,6 +106,66 @@ def _resolve_max_fix_attempts(brief_json: object) -> int:
     if value < 0:
         value = 0
     return value
+
+
+def _normalize_optional_str(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    cleaned = value.strip()
+    return cleaned or None
+
+
+async def _resolve_prompt_preset_text(
+    *,
+    session: AsyncSession,
+    kind: WorkflowKind,
+    state: dict[str, Any],
+) -> str | None:
+    if kind == WorkflowKind.script:
+        catalog_key = "script"
+    elif kind == WorkflowKind.novel_to_script:
+        catalog_key = "novel_to_script"
+    else:
+        return None
+
+    catalogs = await get_prompt_presets(session=session)
+    catalog = catalogs.get(catalog_key) if isinstance(catalogs, dict) else None
+    if not isinstance(catalog, dict):
+        return None
+
+    presets = catalog.get("presets")
+    if not isinstance(presets, list) or not presets:
+        return None
+
+    raw_preset_id = _normalize_optional_str(state.get("prompt_preset_id"))
+    default_preset_id = _normalize_optional_str(catalog.get("default_preset_id"))
+
+    def lookup(preset_id: str) -> str | None:
+        for item in presets:
+            if not isinstance(item, dict):
+                continue
+            item_id = _normalize_optional_str(item.get("id"))
+            if item_id != preset_id:
+                continue
+            return _normalize_optional_str(item.get("text"))
+        return None
+
+    if raw_preset_id:
+        resolved = lookup(raw_preset_id)
+        if resolved is not None:
+            return resolved
+
+    if default_preset_id:
+        resolved = lookup(default_preset_id)
+        if resolved is not None:
+            return resolved
+
+    first = presets[0] if presets else None
+    if isinstance(first, dict):
+        return _normalize_optional_str(first.get("text"))
+    return None
 
 
 _NTS_PROMPT_LEAK_MARKERS = (
@@ -793,6 +853,11 @@ async def execute_next_step(
 
         if phase == "script_scene_draft":
             output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
+            preset_notes = await _resolve_prompt_preset_text(session=session, kind=run.kind, state=state)
+            if preset_notes is None:
+                output_spec.pop("script_format_notes", None)
+            else:
+                output_spec["script_format_notes"] = preset_notes
             query = f"Scene {scene.slug} {scene.title} {scene.location} {scene.time}"
             evidence_chunks = []
             if not _rag_is_disabled(state):
@@ -1057,39 +1122,16 @@ async def execute_next_step(
 
         output_spec = dict((brief_json.get("output_spec") or {}) if isinstance(brief_json, dict) else {})
         conversion_output_spec = state.get("conversion_output_spec")
-        has_run_notes = False
         if isinstance(conversion_output_spec, dict):
             cleaned = dict(conversion_output_spec)
-            if "script_format_notes" in cleaned:
-                raw_notes = cleaned.get("script_format_notes")
-                if raw_notes is None:
-                    cleaned.pop("script_format_notes", None)
-                else:
-                    notes = str(raw_notes).strip()
-                    if not notes:
-                        cleaned.pop("script_format_notes", None)
-                    else:
-                        cleaned["script_format_notes"] = notes
-                        has_run_notes = True
+            cleaned.pop("script_format_notes", None)
             output_spec = deep_merge(output_spec, cleaned)
 
-        raw_existing_notes = output_spec.get("script_format_notes")
-        if raw_existing_notes is None:
+        preset_notes = await _resolve_prompt_preset_text(session=session, kind=run.kind, state=state)
+        if preset_notes is None:
             output_spec.pop("script_format_notes", None)
         else:
-            existing_notes = str(raw_existing_notes).strip()
-            if existing_notes:
-                output_spec["script_format_notes"] = existing_notes
-            else:
-                output_spec.pop("script_format_notes", None)
-
-        if (not has_run_notes) and ("script_format_notes" not in output_spec):
-            defaults = await get_novel_to_script_prompt_defaults(session=session)
-            global_notes = defaults.get("conversion_notes")
-            if isinstance(global_notes, str):
-                global_notes = global_notes.strip()
-                if global_notes:
-                    output_spec["script_format_notes"] = global_notes
+            output_spec["script_format_notes"] = preset_notes
         brief_json_for_conversion = dict(brief_json) if isinstance(brief_json, dict) else {}
         brief_json_for_conversion["output_spec"] = output_spec
 

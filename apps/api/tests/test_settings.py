@@ -148,3 +148,29 @@ async def test_novel_to_script_prompt_defaults_get_and_patch_and_clear(client):
     cleared = await client.patch("/api/settings/novel-to-script-prompt", json={"conversion_notes": None})
     assert cleared.status_code == 200
     assert cleared.json()["conversion_notes"] is None
+
+
+async def test_prompt_presets_get_and_patch(client):
+    got = await client.get("/api/settings/prompt-presets")
+    assert got.status_code == 200
+    body = got.json()
+    assert "script" in body
+    assert "novel_to_script" in body
+    assert isinstance(body["script"]["presets"], list)
+    assert isinstance(body["novel_to_script"]["presets"], list)
+    assert body["script"]["presets"]
+    assert body["novel_to_script"]["presets"]
+
+    patched = await client.patch(
+        "/api/settings/prompt-presets",
+        json={
+            "script": {
+                "default_preset_id": "missing",
+                "presets": [{"id": "a", "name": "A", "text": "HELLO"}],
+            }
+        },
+    )
+    assert patched.status_code == 200
+    patched_body = patched.json()
+    assert patched_body["script"]["presets"][0]["text"] == "HELLO"
+    assert patched_body["script"]["default_preset_id"] == "a"

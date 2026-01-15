@@ -44,6 +44,25 @@ export type NovelToScriptPromptDefaults = {
 	[key: string]: unknown;
 };
 
+export type PromptPreset = {
+	id: string;
+	name: string;
+	text: string;
+	[key: string]: unknown;
+};
+
+export type PromptPresetCatalog = {
+	default_preset_id: string | null;
+	presets: PromptPreset[];
+	[key: string]: unknown;
+};
+
+export type PromptPresets = {
+	script: PromptPresetCatalog;
+	novel_to_script: PromptPresetCatalog;
+	[key: string]: unknown;
+};
+
 export type LlmProviderSettings = {
 	base_url: string | null;
 	model: string;
@@ -285,6 +304,20 @@ export async function patchNovelToScriptPromptDefaults(payload: {
 	});
 }
 
+export async function getPromptPresets(): Promise<PromptPresets> {
+	return await fetchJson<PromptPresets>('/api/settings/prompt-presets');
+}
+
+export async function patchPromptPresets(payload: {
+	script?: PromptPresetCatalog | null;
+	novel_to_script?: PromptPresetCatalog | null;
+}): Promise<PromptPresets> {
+	return await fetchJson<PromptPresets>('/api/settings/prompt-presets', {
+		method: 'PATCH',
+		body: JSON.stringify(payload),
+	});
+}
+
 export async function getLlmProviderSettings(): Promise<LlmProviderSettings> {
 	return await fetchJson<LlmProviderSettings>('/api/settings/llm-provider');
 }
@@ -507,6 +540,7 @@ export async function createWorkflowRun(payload: {
 	kind: WorkflowRunRead['kind'];
 	brief_snapshot_id: string;
 	source_brief_snapshot_id?: string | null;
+	prompt_preset_id?: string | null;
 	conversion_output_spec?:
 		| {
 				script_format?: ScriptFormat | null;
@@ -521,6 +555,7 @@ export async function createWorkflowRun(payload: {
 			kind: payload.kind,
 			brief_snapshot_id: payload.brief_snapshot_id,
 			source_brief_snapshot_id: payload.source_brief_snapshot_id ?? null,
+			prompt_preset_id: payload.prompt_preset_id ?? null,
 			conversion_output_spec: payload.conversion_output_spec ?? null,
 			state: payload.state ?? {},
 		}),

@@ -15,6 +15,7 @@ class WorkflowRunCreate(BaseModel):
     brief_snapshot_id: uuid.UUID
     source_brief_snapshot_id: uuid.UUID | None = None
     conversion_output_spec: OutputSpecOverrides | None = None
+    prompt_preset_id: str | None = None
     status: RunStatus = Field(default=RunStatus.queued)
     state: dict[str, Any] = Field(default_factory=dict)
 

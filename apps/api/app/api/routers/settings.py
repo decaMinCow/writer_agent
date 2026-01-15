@@ -11,14 +11,18 @@ from app.schemas.settings import (
     NovelToScriptPromptDefaultsRead,
     OutputSpecDefaultsPatch,
     OutputSpecDefaultsRead,
+    PromptPresetsPatch,
+    PromptPresetsRead,
 )
 from app.services.settings_store import (
     get_llm_provider_settings,
     get_novel_to_script_prompt_defaults,
     get_output_spec_defaults,
+    get_prompt_presets,
     patch_llm_provider_settings,
     patch_novel_to_script_prompt_defaults,
     patch_output_spec_defaults,
+    patch_prompt_presets,
  )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -109,3 +113,21 @@ async def patch_llm_provider_settings_route(
     env_settings = getattr(request.app.state, "settings", None)
     resolved = await get_llm_provider_settings(session=session, env_settings=env_settings)
     return LlmProviderSettingsRead.model_validate(resolved)
+
+
+@router.get("/prompt-presets", response_model=PromptPresetsRead)
+async def get_prompt_presets_route(
+    session: AsyncSession = Depends(get_db_session),
+) -> PromptPresetsRead:
+    resolved = await get_prompt_presets(session=session)
+    return PromptPresetsRead.model_validate(resolved)
+
+
+@router.patch("/prompt-presets", response_model=PromptPresetsRead)
+async def patch_prompt_presets_route(
+    payload: PromptPresetsPatch,
+    session: AsyncSession = Depends(get_db_session),
+) -> PromptPresetsRead:
+    patch = payload.model_dump(exclude_unset=True)
+    resolved = await patch_prompt_presets(session=session, patch=patch)
+    return PromptPresetsRead.model_validate(resolved)

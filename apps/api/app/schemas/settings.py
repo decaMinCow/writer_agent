@@ -59,3 +59,39 @@ class NovelToScriptPromptDefaultsPatch(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     conversion_notes: str | None = None
+
+
+class PromptPreset(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    text: str = ""
+
+
+class PromptPresetCatalogRead(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    default_preset_id: str | None = None
+    presets: list[PromptPreset]
+
+
+class PromptPresetCatalogPatch(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    default_preset_id: str | None = None
+    presets: list[PromptPreset] | None = None
+
+
+class PromptPresetsRead(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    script: PromptPresetCatalogRead
+    novel_to_script: PromptPresetCatalogRead
+
+
+class PromptPresetsPatch(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    script: PromptPresetCatalogPatch | None = None
+    novel_to_script: PromptPresetCatalogPatch | None = None

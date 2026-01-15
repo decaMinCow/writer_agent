@@ -14,7 +14,7 @@
 		forkWorkflowRun,
 		getArtifactVersion,
 		getGlobalOutputSpecDefaults,
-		getNovelToScriptPromptDefaults,
+		getPromptPresets,
 		getLlmProviderSettings,
 		getKnowledgeGraph,
 		createArtifactVersion,
@@ -35,7 +35,7 @@
 		updateOpenThread,
 		patchBriefOutputSpecOverrides,
 		patchGlobalOutputSpecDefaults,
-		patchNovelToScriptPromptDefaults,
+		patchPromptPresets,
 		patchLlmProviderSettings,
 		streamBriefMessage,
 		rebuildKnowledgeGraph,
@@ -68,7 +68,7 @@
 		type PropagationPreviewResponse,
 		type GlossaryEntryRead,
 		type OutputSpecDefaults,
-		type NovelToScriptPromptDefaults,
+		type PromptPresets,
 		type LlmProviderSettings,
 		type ScriptFormat,
 		type WorkflowRunRead,
@@ -97,9 +97,14 @@
 	let globalAutoStepBackoffDraft = '1';
 	let savingGlobalPrefs = false;
 
-	let globalNtsPrompt: NovelToScriptPromptDefaults | null = null;
-	let globalNtsPromptDraft = '';
-	let savingGlobalNtsPrompt = false;
+	let promptPresets: PromptPresets | null = null;
+	let savingPromptPresets = false;
+	let scriptPromptPresetIdDraft = '';
+	let scriptPromptPresetNameDraft = '';
+	let scriptPromptPresetTextDraft = '';
+	let ntsPromptPresetIdDraft = '';
+	let ntsPromptPresetNameDraft = '';
+	let ntsPromptPresetTextDraft = '';
 
 	let llmProviderSettings: LlmProviderSettings | null = null;
 	let providerBaseUrlDraft = '';
@@ -140,8 +145,6 @@
 	let workflowKindDraft: WorkflowRunRead['kind'] = 'novel';
 	let creatingRun = false;
 	let ntsSourceSnapshotIdDraft = '';
-	let ntsConversionScriptFormatDraft: ScriptFormat = 'custom';
-	let ntsConversionNotesDraft = '';
 	let stepping = false;
 	let autoRunning = false;
 	let runEvents: EventSource | null = null;
@@ -202,12 +205,88 @@
 	let runningLint = false;
 	let lintUseLlm = true;
 
+	type RightPaneTab = 'project' | 'assets' | 'settings';
+	const RIGHT_PANE_TAB_STORAGE_KEY = 'writer_agent2:right_pane_tab';
+	let rightPaneTab: RightPaneTab = 'project';
+
 	function tempId(prefix: string): string {
 		const uuid =
 			typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
 				? crypto.randomUUID()
 				: String(Date.now() + Math.random());
 		return `${prefix}-${uuid}`;
+	}
+
+	function setRightPaneTab(tab: RightPaneTab) {
+		rightPaneTab = tab;
+		try {
+			localStorage.setItem(RIGHT_PANE_TAB_STORAGE_KEY, tab);
+		} catch {
+			// ignore
+		}
+	}
+
+	function workflowStatusLabel(status: string): string {
+		const mapping: Record<string, string> = {
+			queued: '排队中',
+			running: '运行中',
+			paused: '已暂停',
+			succeeded: '已完成',
+			failed: '失败',
+			canceled: '已取消',
+		};
+		return mapping[status] ?? status;
+	}
+
+	function messageRoleLabel(role: string): string {
+		const mapping: Record<string, string> = {
+			user: '用户',
+			assistant: '助手',
+			system: '系统',
+		};
+		return mapping[role] ?? role;
+	}
+
+	function scriptFormatLabel(format: string): string {
+		const mapping: Record<string, string> = {
+			screenplay_int_ext: '影视剧本（INT/EXT）',
+			stage_play: '舞台剧',
+			custom: '自定义（短剧集/场）',
+		};
+		return mapping[format] ?? format;
+	}
+
+	function artifactSourceLabel(source: string): string {
+		const mapping: Record<string, string> = {
+			user: '用户',
+			agent: 'AI',
+		};
+		return mapping[source] ?? source;
+	}
+
+	function openThreadStatusLabel(status: string): string {
+		const mapping: Record<string, string> = {
+			open: '未回收',
+			closed: '已回收',
+		};
+		return mapping[status] ?? status;
+	}
+
+	function openThreadRefKindLabel(kind: string): string {
+		const mapping: Record<string, string> = {
+			introduced: '引入',
+			reinforced: '强化',
+			resolved: '回收',
+		};
+		return mapping[kind] ?? kind;
+	}
+
+	function lintSeverityLabel(severity: string): string {
+		const mapping: Record<string, string> = {
+			hard: '硬',
+			soft: '软',
+		};
+		return mapping[severity] ?? severity;
 	}
 
 	function autosizeMessageTextarea() {
@@ -290,9 +369,27 @@
 		globalAutoStepBackoffDraft = String(globalOutputSpec.auto_step_backoff_s ?? 1);
 	}
 
-	function syncGlobalNtsPromptDrafts() {
-		if (!globalNtsPrompt) return;
-		globalNtsPromptDraft = globalNtsPrompt.conversion_notes ?? '';
+	function syncPromptPresetDrafts() {
+		if (!promptPresets) return;
+		const scriptDefault =
+			promptPresets.script.default_preset_id ?? promptPresets.script.presets[0]?.id ?? '';
+		if (
+			!scriptPromptPresetIdDraft ||
+			!promptPresets.script.presets.some((p) => p.id === scriptPromptPresetIdDraft)
+		) {
+			scriptPromptPresetIdDraft = scriptDefault;
+		}
+
+		const ntsDefault =
+			promptPresets.novel_to_script.default_preset_id ??
+			promptPresets.novel_to_script.presets[0]?.id ??
+			'';
+		if (
+			!ntsPromptPresetIdDraft ||
+			!promptPresets.novel_to_script.presets.some((p) => p.id === ntsPromptPresetIdDraft)
+		) {
+			ntsPromptPresetIdDraft = ntsDefault;
+		}
 	}
 
 	function syncProviderDrafts() {
@@ -377,12 +474,12 @@
 	async function refreshSettings() {
 		error = null;
 		try {
-			[globalOutputSpec, globalNtsPrompt] = await Promise.all([
+			[globalOutputSpec, promptPresets] = await Promise.all([
 				getGlobalOutputSpecDefaults(),
-				getNovelToScriptPromptDefaults(),
+				getPromptPresets(),
 			]);
 			syncGlobalDrafts();
-			syncGlobalNtsPromptDrafts();
+			syncPromptPresetDrafts();
 			syncBriefOverrideDrafts();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -461,8 +558,6 @@
 		selectedSnapshot = null;
 		selectedStep = null;
 		ntsSourceSnapshotIdDraft = '';
-		ntsConversionScriptFormatDraft = 'custom';
-		ntsConversionNotesDraft = '';
 		workflowSteps = [];
 		artifactVersions = [];
 		selectedArtifactVersion = null;
@@ -923,10 +1018,8 @@
 		}
 		selectedSnapshot = snap;
 		showSnapshotJson = false;
-			ntsSourceSnapshotIdDraft = snap.id;
-			const effective = effectiveOutputSpec();
-			ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
-			ntsConversionNotesDraft = '';
+		ntsSourceSnapshotIdDraft = snap.id;
+		syncPromptPresetDrafts();
 			try {
 				artifacts = await listArtifacts({ brief_snapshot_id: snap.id });
 			} catch (e) {
@@ -962,14 +1055,12 @@
 			briefSnapshots = await listBriefSnapshots(selectedBrief.id);
 			selectedSnapshot = snap;
 			showSnapshotJson = false;
-				ntsSourceSnapshotIdDraft = snap.id;
-				const effective = effectiveOutputSpec();
-				ntsConversionScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
-				ntsConversionNotesDraft = '';
-			} catch (e) {
-				error = e instanceof Error ? e.message : String(e);
-			} finally {
-				creatingSnapshot = false;
+			ntsSourceSnapshotIdDraft = snap.id;
+			syncPromptPresetDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			creatingSnapshot = false;
 		}
 	}
 
@@ -1091,8 +1182,6 @@
 			const backoff = Number(globalAutoStepBackoffDraft);
 			globalOutputSpec = await patchGlobalOutputSpecDefaults({
 				language: globalLanguageDraft.trim() || null,
-				script_format: globalScriptFormatDraft,
-				script_format_notes: globalScriptNotesDraft.trim() ? globalScriptNotesDraft.trim() : null,
 				max_fix_attempts: Number.isFinite(maxFix) && maxFix >= 0 ? Math.floor(maxFix) : null,
 				auto_step_retries: Number.isFinite(retries) && retries >= 0 ? Math.floor(retries) : null,
 				auto_step_backoff_s: Number.isFinite(backoff) && backoff >= 0 ? backoff : null,
@@ -1106,19 +1195,155 @@
 		}
 	}
 
-	async function saveGlobalNtsPrompt() {
+	function newPromptPresetId(prefix: string): string {
+		const uuid =
+			typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+				? crypto.randomUUID()
+				: `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+		return `${prefix}-${uuid}`;
+	}
+
+	function findPromptPreset(
+		catalogKey: 'script' | 'novel_to_script',
+		presetId: string,
+	): { id: string; name: string; text: string } | null {
+		if (!promptPresets) return null;
+		const catalog = catalogKey === 'script' ? promptPresets.script : promptPresets.novel_to_script;
+		return catalog.presets.find((p) => p.id === presetId) ?? null;
+	}
+
+	async function saveSelectedPromptPreset(catalogKey: 'script' | 'novel_to_script') {
+		if (!promptPresets) return;
 		error = null;
-		savingGlobalNtsPrompt = true;
+		savingPromptPresets = true;
 		try {
-			const notes = globalNtsPromptDraft.trim();
-			globalNtsPrompt = await patchNovelToScriptPromptDefaults({
-				conversion_notes: notes ? notes : null,
-			});
-			syncGlobalNtsPromptDrafts();
+			const catalog = catalogKey === 'script' ? promptPresets.script : promptPresets.novel_to_script;
+			const selectedId =
+				catalogKey === 'script' ? scriptPromptPresetIdDraft : ntsPromptPresetIdDraft;
+			if (!selectedId) return;
+
+			const updatedPresets = catalog.presets.map((p) =>
+				p.id === selectedId
+					? {
+							...p,
+							name:
+								(catalogKey === 'script'
+									? scriptPromptPresetNameDraft
+									: ntsPromptPresetNameDraft
+								).trim() || p.name,
+							text:
+								catalogKey === 'script'
+									? scriptPromptPresetTextDraft
+									: ntsPromptPresetTextDraft,
+						}
+					: p,
+			);
+			const updatedCatalog = {
+				...catalog,
+				presets: updatedPresets,
+			};
+			promptPresets =
+				catalogKey === 'script'
+					? await patchPromptPresets({ script: updatedCatalog })
+					: await patchPromptPresets({ novel_to_script: updatedCatalog });
+			syncPromptPresetDrafts();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
-			savingGlobalNtsPrompt = false;
+			savingPromptPresets = false;
+		}
+	}
+
+	async function addPromptPreset(catalogKey: 'script' | 'novel_to_script') {
+		if (!promptPresets) return;
+		error = null;
+		savingPromptPresets = true;
+		try {
+			const catalog = catalogKey === 'script' ? promptPresets.script : promptPresets.novel_to_script;
+			const newPreset = {
+				id: newPromptPresetId(catalogKey === 'script' ? 'script' : 'nts'),
+				name: '新模板',
+				text: '',
+			};
+			const updatedCatalog = {
+				...catalog,
+				presets: [...catalog.presets, newPreset],
+			};
+			promptPresets =
+				catalogKey === 'script'
+					? await patchPromptPresets({ script: updatedCatalog })
+					: await patchPromptPresets({ novel_to_script: updatedCatalog });
+			if (catalogKey === 'script') {
+				scriptPromptPresetIdDraft = newPreset.id;
+			} else {
+				ntsPromptPresetIdDraft = newPreset.id;
+			}
+			syncPromptPresetDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingPromptPresets = false;
+		}
+	}
+
+	async function deleteSelectedPromptPreset(catalogKey: 'script' | 'novel_to_script') {
+		if (!promptPresets) return;
+		const catalog = catalogKey === 'script' ? promptPresets.script : promptPresets.novel_to_script;
+		const selectedId =
+			catalogKey === 'script' ? scriptPromptPresetIdDraft : ntsPromptPresetIdDraft;
+		if (!selectedId) return;
+		if (catalog.presets.length <= 1) {
+			alert('至少保留 1 个模板。');
+			return;
+		}
+		if (!confirm('确定删除该模板吗？')) return;
+
+		error = null;
+		savingPromptPresets = true;
+		try {
+			const updatedPresets = catalog.presets.filter((p) => p.id !== selectedId);
+			const nextDefault =
+				catalog.default_preset_id === selectedId
+					? updatedPresets[0]?.id ?? null
+					: catalog.default_preset_id;
+			const updatedCatalog = { ...catalog, presets: updatedPresets, default_preset_id: nextDefault };
+			promptPresets =
+				catalogKey === 'script'
+					? await patchPromptPresets({ script: updatedCatalog })
+					: await patchPromptPresets({ novel_to_script: updatedCatalog });
+			const nextSelected = nextDefault ?? updatedPresets[0]?.id ?? '';
+			if (catalogKey === 'script') {
+				scriptPromptPresetIdDraft = nextSelected;
+			} else {
+				ntsPromptPresetIdDraft = nextSelected;
+			}
+			syncPromptPresetDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingPromptPresets = false;
+		}
+	}
+
+	async function setDefaultPromptPreset(catalogKey: 'script' | 'novel_to_script') {
+		if (!promptPresets) return;
+		error = null;
+		savingPromptPresets = true;
+		try {
+			const catalog = catalogKey === 'script' ? promptPresets.script : promptPresets.novel_to_script;
+			const selectedId =
+				catalogKey === 'script' ? scriptPromptPresetIdDraft : ntsPromptPresetIdDraft;
+			if (!selectedId) return;
+			const updatedCatalog = { ...catalog, default_preset_id: selectedId };
+			promptPresets =
+				catalogKey === 'script'
+					? await patchPromptPresets({ script: updatedCatalog })
+					: await patchPromptPresets({ novel_to_script: updatedCatalog });
+			syncPromptPresetDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingPromptPresets = false;
 		}
 	}
 
@@ -1137,8 +1362,6 @@
 			const parsedBackoff = Number.isFinite(backoff) && backoff >= 0 ? backoff : null;
 			const updated = await patchBriefOutputSpecOverrides(selectedBrief.id, {
 				language: overrideLanguage ? briefLanguageDraft.trim() || null : null,
-				script_format: overrideScriptFormat ? briefScriptFormatDraft : null,
-				script_format_notes: overrideScriptNotes ? briefScriptNotesDraft : null,
 				max_fix_attempts: overrideMaxFixAttempts ? parsedMaxFix : null,
 				auto_step_retries: overrideAutoStepRetries ? parsedRetries : null,
 				auto_step_backoff_s: overrideAutoStepBackoff ? parsedBackoff : null,
@@ -1155,13 +1378,25 @@
 
 	async function resetBriefPrefsToGlobal() {
 		if (!selectedBrief) return;
-		overrideLanguage = false;
-		overrideScriptFormat = false;
-		overrideScriptNotes = false;
-		overrideMaxFixAttempts = false;
-		overrideAutoStepRetries = false;
-		overrideAutoStepBackoff = false;
-		await saveBriefPrefs();
+		error = null;
+		savingBriefPrefs = true;
+		try {
+			const updated = await patchBriefOutputSpecOverrides(selectedBrief.id, {
+				language: null,
+				script_format: null,
+				script_format_notes: null,
+				max_fix_attempts: null,
+				auto_step_retries: null,
+				auto_step_backoff_s: null,
+			});
+			selectedBrief = updated;
+			await refreshAll();
+			syncBriefOverrideDrafts();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingBriefPrefs = false;
+		}
 	}
 
 	async function sendMessage() {
@@ -1242,12 +1477,9 @@
 			if (workflowKindDraft === 'novel_to_script') {
 				const sourceId = ntsSourceSnapshotIdDraft || selectedSnapshot.id;
 				payload.source_brief_snapshot_id = sourceId !== selectedSnapshot.id ? sourceId : null;
-				payload.conversion_output_spec = {
-					script_format: ntsConversionScriptFormatDraft,
-					script_format_notes: ntsConversionNotesDraft.trim()
-						? ntsConversionNotesDraft.trim()
-						: null,
-				};
+				payload.prompt_preset_id = ntsPromptPresetIdDraft || null;
+			} else if (workflowKindDraft === 'script') {
+				payload.prompt_preset_id = scriptPromptPresetIdDraft || null;
 			}
 
 			const run = await createWorkflowRun(payload);
@@ -1655,7 +1887,39 @@
 		return Object.prototype.hasOwnProperty.call(state, 'critic');
 	}
 
+	$: {
+		if (!promptPresets) {
+			scriptPromptPresetNameDraft = '';
+			scriptPromptPresetTextDraft = '';
+		} else {
+			const preset =
+				promptPresets.script.presets.find((p) => p.id === scriptPromptPresetIdDraft) ?? null;
+			scriptPromptPresetNameDraft = preset?.name ?? '';
+			scriptPromptPresetTextDraft = preset?.text ?? '';
+		}
+	}
+
+	$: {
+		if (!promptPresets) {
+			ntsPromptPresetNameDraft = '';
+			ntsPromptPresetTextDraft = '';
+		} else {
+			const preset =
+				promptPresets.novel_to_script.presets.find((p) => p.id === ntsPromptPresetIdDraft) ?? null;
+			ntsPromptPresetNameDraft = preset?.name ?? '';
+			ntsPromptPresetTextDraft = preset?.text ?? '';
+		}
+	}
+
 	onMount(async () => {
+		try {
+			const saved = localStorage.getItem(RIGHT_PANE_TAB_STORAGE_KEY);
+			if (saved === 'project' || saved === 'assets' || saved === 'settings') {
+				rightPaneTab = saved;
+			}
+		} catch {
+			// ignore
+		}
 		await refreshAll();
 		await refreshSettings();
 		await refreshProviderSettings();
@@ -1697,7 +1961,7 @@
 						{#each briefMessages as m (m.id)}
 							<div class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
 								<div class="mb-1 text-[10px] font-semibold text-zinc-500">
-									{m.role} · {new Date(m.created_at).toLocaleString()}
+									{messageRoleLabel(m.role)} · {new Date(m.created_at).toLocaleString()}
 								</div>
 								<div class="whitespace-pre-wrap text-xs text-zinc-200">{m.content_text}</div>
 							</div>
@@ -1756,7 +2020,7 @@
 						<div class="rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 flex items-center justify-between gap-2">
 								<div class="truncate text-xs font-semibold text-zinc-300">
-									Artifact 编辑 · {selectedArtifact.title ?? selectedArtifact.kind}
+									产物编辑 · {selectedArtifact.title ?? selectedArtifact.kind}
 								</div>
 								<div class="text-[11px] text-zinc-500">{selectedArtifact.ordinal ?? ''}</div>
 							</div>
@@ -1764,15 +2028,15 @@
 							{#if selectedArtifactVersion}
 								<div class="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
 									<div class="rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200">
-										{selectedArtifactVersion.source}
+										{artifactSourceLabel(selectedArtifactVersion.source)}
 									</div>
 									<div>{new Date(selectedArtifactVersion.created_at).toLocaleString()}</div>
 									{#if selectedArtifactVersion.brief_snapshot_id}
 										<div class="truncate">
-											snapshot: {selectedArtifactVersion.brief_snapshot_id}
+											版本（snapshot）：{selectedArtifactVersion.brief_snapshot_id}
 										</div>
 									{:else}
-										<div class="truncate text-zinc-500">snapshot: (none)</div>
+										<div class="truncate text-zinc-500">版本（snapshot）：无</div>
 									{/if}
 								</div>
 
@@ -1885,7 +2149,7 @@
 												</button>
 												{#if propagationEvent}
 													<div class="mt-2 text-[10px] text-zinc-500">
-														event: {propagationEvent.id}
+														事件：{propagationEvent.id}
 													</div>
 												{/if}
 												{#if propagationImpacts.length > 0}
@@ -1906,14 +2170,16 @@
 					{:else}
 						{#if selectedBrief}
 							<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-								<div class="mb-2 text-xs font-semibold text-zinc-300">从 Snapshot 创建 Run</div>
+								<div class="mb-2 text-xs font-semibold text-zinc-300">
+									从版本（Snapshot）创建 Run
+								</div>
 								<div class="flex flex-wrap items-center gap-2">
 									<div class="text-[11px] text-zinc-400">
 										{#if selectedSnapshot}
 											已选：{selectedSnapshot.label ?? '（未命名）'} ·
 											{new Date(selectedSnapshot.created_at).toLocaleString()}
 										{:else}
-											请先在右侧 Snapshots 里选择一个
+											请先在右侧版本（Snapshot）里选择一个
 										{/if}
 									</div>
 									<div class="flex-1"></div>
@@ -1934,6 +2200,30 @@
 										创建
 									</button>
 								</div>
+
+								{#if selectedSnapshot && workflowKindDraft === 'script'}
+									<div class="mt-3 space-y-2 text-xs">
+										<label class="block">
+											<div class="mb-1 text-[10px] text-zinc-500">剧本生成模板</div>
+											<select
+												class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 disabled:opacity-60"
+												bind:value={scriptPromptPresetIdDraft}
+												disabled={creatingRun || !promptPresets}
+											>
+												{#if promptPresets}
+													{#each promptPresets.script.presets as preset (preset.id)}
+														<option value={preset.id}>{preset.name}</option>
+													{/each}
+												{:else}
+													<option value="">（未加载）</option>
+												{/if}
+											</select>
+											<div class="mt-1 text-[10px] text-zinc-500">
+												提示：模板在右侧「设置」里管理；创建 run 时会把所选模板 id 写入 run.state。
+											</div>
+										</label>
+									</div>
+								{/if}
 
 								{#if selectedSnapshot && workflowKindDraft === 'novel_to_script'}
 									<div class="mt-3 space-y-2 text-xs">
@@ -1956,39 +2246,30 @@
 										</label>
 
 										<label class="block">
-											<div class="mb-1 text-[10px] text-zinc-500">转写格式（本次转写专用）</div>
+											<div class="mb-1 text-[10px] text-zinc-500">小说→剧本模板</div>
 											<select
 												class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200"
-												bind:value={ntsConversionScriptFormatDraft}
-												disabled={creatingRun}
+												bind:value={ntsPromptPresetIdDraft}
+												disabled={creatingRun || !promptPresets}
 											>
-												<option value="screenplay_int_ext">影视剧本（INT/EXT）</option>
-												<option value="stage_play">舞台剧</option>
-												<option value="custom">自定义</option>
+												{#if promptPresets}
+													{#each promptPresets.novel_to_script.presets as preset (preset.id)}
+														<option value={preset.id}>{preset.name}</option>
+													{/each}
+												{:else}
+													<option value="">（未加载）</option>
+												{/if}
 											</select>
-										</label>
-
-										<label class="block">
-											<div class="mb-1 text-[10px] text-zinc-500">
-												转写规范备注（建议粘贴短剧格式/流程/台词标准）
+											<div class="mt-1 text-[10px] text-zinc-500">
+												提示：模板在右侧「设置」里管理；默认使用全局默认模板；不再使用 Snapshot/Brief 的“格式备注”作为转写规范。
 											</div>
-											<textarea
-												class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
-												rows="6"
-												placeholder="例如：先列关键剧情（STEP1），再写短剧剧本（STEP2）；每集 500–800 字；严格用 1-1/日夜/内外/地点/出场人物/△动作/台词/OS/OV/闪回…"
-												bind:value={ntsConversionNotesDraft}
-												disabled={creatingRun}
-												></textarea>
-												<div class="mt-1 text-[10px] text-zinc-500">
-													这会写入 run.state（conversion_output_spec），不会修改 Snapshot；留空则使用 Snapshot/Brief 的输出备注，若也为空才使用全局转写规范（如已配置）。
-												</div>
-											</label>
+										</label>
 										</div>
 									{/if}
 							</div>
 						{/if}
 
-						<div class="mb-3 text-xs font-semibold text-zinc-400">Workflow Runs</div>
+						<div class="mb-3 text-xs font-semibold text-zinc-400">工作流运行记录</div>
 						{#if selectedSnapshot}
 							<div class="space-y-1">
 								{#each visibleWorkflowRuns as run (run.id)}
@@ -2003,7 +2284,7 @@
 													<span class="truncate">{runDisplayName(run)}</span>
 													<span
 														class="ml-2 rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200"
-														>{run.status}</span
+														>{workflowStatusLabel(run.status)}</span
 													>
 												</div>
 												{#if run.status === 'failed'}
@@ -2033,7 +2314,7 @@
 							<div class="mt-6">
 								<div class="mb-2 flex items-center justify-between gap-2">
 									<div class="text-xs font-semibold text-zinc-400">
-										Steps · {runDisplayName(selectedRun)} · {selectedRun.status}
+										步骤 · {runDisplayName(selectedRun)} · {workflowStatusLabel(selectedRun.status)}
 									</div>
 									<div class="text-[11px] text-zinc-500">{cursorSummary(selectedRun)}</div>
 								</div>
@@ -2044,7 +2325,7 @@
 										onclick={forkSelectedRun}
 										disabled={forkingRun}
 									>
-										{forkingRun ? 'Forking…' : 'Fork'}
+										{forkingRun ? '分叉中…' : '分叉'}
 									</button>
 									<button
 										class="rounded-md bg-zinc-800 px-3 py-1.5 text-xs hover:bg-zinc-700 disabled:opacity-50"
@@ -2313,7 +2594,7 @@
 										>
 											<div class="flex items-center justify-between">
 												<div class="truncate">{step.step_index ?? ''} · {step.step_name}</div>
-												<div class="text-[10px] text-zinc-400">{step.status}</div>
+												<div class="text-[10px] text-zinc-400">{workflowStatusLabel(step.status)}</div>
 											</div>
 										</button>
 									{/each}
@@ -2325,7 +2606,7 @@
 								{#if selectedStep}
 									<div class="mt-4 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
 										<div class="mb-2 text-xs font-semibold text-zinc-300">
-											Step 输出 · {selectedStep.step_name}
+											步骤输出 · {selectedStep.step_name}
 										</div>
 										{#if selectedStep.status === 'running' ||
 										((llmStreamByStep[selectedStep.id] ?? '').length > 0)}
@@ -2342,13 +2623,13 @@
 										{#if (selectedStep.outputs as any)?.fact_digest || (selectedStep.outputs as any)?.tone_digest}
 											<div class="mb-2 grid grid-cols-2 gap-2 text-[11px]">
 												<div class="rounded border border-zinc-800 bg-zinc-950/30 p-2">
-													<div class="mb-1 font-semibold text-zinc-400">Fact Digest</div>
+													<div class="mb-1 font-semibold text-zinc-400">事实摘要</div>
 													<div class="whitespace-pre-wrap text-zinc-200">
 														{((selectedStep.outputs as any).fact_digest as string) ?? ''}
 													</div>
 												</div>
 												<div class="rounded border border-zinc-800 bg-zinc-950/30 p-2">
-													<div class="mb-1 font-semibold text-zinc-400">Tone Digest</div>
+													<div class="mb-1 font-semibold text-zinc-400">氛围摘要</div>
 													<div class="whitespace-pre-wrap text-zinc-200">
 														{((selectedStep.outputs as any).tone_digest as string) ?? ''}
 													</div>
@@ -2363,7 +2644,7 @@
 											)}</pre>
 										{#if selectedStep.error}
 											<div class="mt-2 rounded border border-red-900/60 bg-red-950/30 p-2">
-												<div class="mb-1 text-[10px] font-semibold text-red-200">error</div>
+												<div class="mb-1 text-[10px] font-semibold text-red-200">错误</div>
 												<pre
 													class="max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-red-100">{selectedStep.error}</pre>
 											</div>
@@ -2378,10 +2659,48 @@
 
 			<!-- Right: Assets -->
 			<section class="flex min-h-0 flex-col">
-				<div class="border-b border-zinc-800 px-4 py-3 text-xs font-semibold text-zinc-300">
-					故事资产
+				<div class="border-b border-zinc-800 px-4 py-3">
+					<div class="flex items-center justify-between gap-3">
+						<div class="text-xs font-semibold text-zinc-300">侧栏</div>
+						<div class="inline-flex rounded-md border border-zinc-800 bg-zinc-900 p-1 text-[11px]">
+							<button
+								class="rounded px-3 py-1 text-zinc-200 hover:bg-zinc-800"
+								class:bg-zinc-800={rightPaneTab === 'project'}
+								onclick={() => setRightPaneTab('project')}
+							>
+								项目
+							</button>
+							<button
+								class="rounded px-3 py-1 text-zinc-200 hover:bg-zinc-800"
+								class:bg-zinc-800={rightPaneTab === 'assets'}
+								onclick={() => setRightPaneTab('assets')}
+							>
+								资产
+							</button>
+							<button
+								class="rounded px-3 py-1 text-zinc-200 hover:bg-zinc-800"
+								class:bg-zinc-800={rightPaneTab === 'settings'}
+								onclick={() => setRightPaneTab('settings')}
+							>
+								设置
+							</button>
+						</div>
+					</div>
+					<div class="mt-2 text-[10px] text-zinc-500">
+						{#if selectedBrief}
+							当前：{selectedBrief.title ?? '（未命名简报）'}
+							{#if selectedSnapshot}
+								· {selectedSnapshot.label ?? '（未命名版本）'}
+							{:else}
+								· 未选择版本
+							{/if}
+						{:else}
+							未选择简报
+						{/if}
+					</div>
 				</div>
 				<div class="min-h-0 flex-1 overflow-auto p-4">
+					{#if rightPaneTab === 'settings'}
 					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 						<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
 							<span>模型提供商（OpenAI 兼容）</span>
@@ -2400,7 +2719,7 @@
 
 							<div class="space-y-2 text-xs">
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">Base URL</div>
+									<div class="mb-1 text-[10px] text-zinc-500">接口地址（Base URL）</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										placeholder="https://api.openai.com/v1"
@@ -2409,7 +2728,7 @@
 									/>
 								</label>
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">Chat Model</div>
+									<div class="mb-1 text-[10px] text-zinc-500">对话模型</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										placeholder="gpt-4o-mini"
@@ -2418,7 +2737,7 @@
 									/>
 								</label>
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">Embeddings Model</div>
+									<div class="mb-1 text-[10px] text-zinc-500">Embedding 模型</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										placeholder="text-embedding-3-small"
@@ -2501,7 +2820,7 @@
 						{#if globalOutputSpec}
 							<div class="space-y-2 text-xs">
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">语言（default）</div>
+									<div class="mb-1 text-[10px] text-zinc-500">语言（全局默认）</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										placeholder="zh-CN"
@@ -2510,29 +2829,7 @@
 									/>
 								</label>
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">剧本格式（default）</div>
-									<select
-										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200"
-										bind:value={globalScriptFormatDraft}
-										disabled={savingGlobalPrefs}
-									>
-										<option value="screenplay_int_ext">影视剧本（INT/EXT）</option>
-										<option value="stage_play">舞台剧</option>
-										<option value="custom">自定义</option>
-									</select>
-								</label>
-								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">格式备注（default）</div>
-									<textarea
-										class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
-										rows="3"
-										placeholder="例如：对白密度、镜头语言、场景标题格式…"
-										bind:value={globalScriptNotesDraft}
-										disabled={savingGlobalPrefs}
-									></textarea>
-								</label>
-								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">自动修复最大次数（default）</div>
+									<div class="mb-1 text-[10px] text-zinc-500">自动修复最大次数（全局默认）</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										type="number"
@@ -2543,7 +2840,7 @@
 									/>
 								</label>
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">自动跑 step 重试次数（default）</div>
+									<div class="mb-1 text-[10px] text-zinc-500">自动跑步骤重试次数（全局默认）</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										type="number"
@@ -2554,7 +2851,7 @@
 									/>
 								</label>
 								<label class="block">
-									<div class="mb-1 text-[10px] text-zinc-500">自动跑 step 重试 backoff（秒，default）</div>
+									<div class="mb-1 text-[10px] text-zinc-500">自动跑步骤重试退避（秒，全局默认）</div>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
 										type="number"
@@ -2579,7 +2876,7 @@
 
 						<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
-								<span>小说→剧本 · 全局转写规范</span>
+								<span>剧本生成模板</span>
 								<button
 									class="rounded bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
 									onclick={refreshSettings}
@@ -2588,31 +2885,173 @@
 								</button>
 							</div>
 
-							{#if globalNtsPrompt}
+							{#if promptPresets}
 								<div class="space-y-2 text-xs">
-									<textarea
-										class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
-										rows="6"
-										placeholder="留空表示不启用。可粘贴短剧格式/集场拆分/钩子规则/台词标准等。"
-										bind:value={globalNtsPromptDraft}
-										disabled={savingGlobalNtsPrompt}
-									></textarea>
-									<div class="text-[10px] text-zinc-500">
-										优先级：Run「转写规范备注」 &gt; Snapshot/Brief 的输出备注 &gt; 这里的全局默认。
+									<label class="block">
+										<div class="mb-1 text-[10px] text-zinc-500">
+											选择模板（默认：{promptPresets.script.default_preset_id ?? '（未设置）'}）
+										</div>
+										<select
+											class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 disabled:opacity-60"
+											bind:value={scriptPromptPresetIdDraft}
+											disabled={savingPromptPresets}
+										>
+											{#each promptPresets.script.presets as preset (preset.id)}
+												<option value={preset.id}>{preset.name}</option>
+											{/each}
+										</select>
+									</label>
+
+									<label class="block">
+										<div class="mb-1 text-[10px] text-zinc-500">模板名称</div>
+										<input
+											class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
+											placeholder="例如：默认 / 短剧快节奏 / 更口语化"
+											bind:value={scriptPromptPresetNameDraft}
+											disabled={savingPromptPresets || !scriptPromptPresetIdDraft}
+										/>
+									</label>
+
+									<label class="block">
+										<div class="mb-1 text-[10px] text-zinc-500">模板内容（强约束，可留空）</div>
+										<textarea
+											class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
+											rows="6"
+											placeholder="例如：台词更口语化、冲突更密；每场 300–500 字；结尾必须留悬念…"
+											bind:value={scriptPromptPresetTextDraft}
+											disabled={savingPromptPresets || !scriptPromptPresetIdDraft}
+										></textarea>
+										<div class="mt-1 text-[10px] text-zinc-500">
+											提示：创建「剧本」run 时会把这里注入 `output_spec.script_format_notes`，用于控制风格与格式细节。
+										</div>
+									</label>
+
+									<div class="flex flex-wrap gap-2">
+										<button
+											class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+											onclick={() => saveSelectedPromptPreset('script')}
+											disabled={savingPromptPresets || !scriptPromptPresetIdDraft}
+										>
+											保存模板
+										</button>
+										<button
+											class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+											onclick={() => addPromptPreset('script')}
+											disabled={savingPromptPresets}
+										>
+											新建
+										</button>
+										<button
+											class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+											onclick={() => setDefaultPromptPreset('script')}
+											disabled={savingPromptPresets || !scriptPromptPresetIdDraft}
+										>
+											设为默认
+										</button>
+										<button
+											class="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200 hover:bg-red-950/60 disabled:opacity-50"
+											onclick={() => deleteSelectedPromptPreset('script')}
+											disabled={savingPromptPresets || !scriptPromptPresetIdDraft}
+										>
+											删除
+										</button>
 									</div>
-									<button
-										class="w-full rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
-										onclick={saveGlobalNtsPrompt}
-										disabled={savingGlobalNtsPrompt}
-									>
-										{savingGlobalNtsPrompt ? '保存中…' : '保存全局转写规范'}
-									</button>
 								</div>
 							{:else}
 								<div class="text-xs text-zinc-500">未加载（请检查 API 是否可用）</div>
 							{/if}
 						</div>
 
+						<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+							<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
+								<span>小说→剧本模板</span>
+								<button
+									class="rounded bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+									onclick={refreshSettings}
+								>
+									刷新
+								</button>
+							</div>
+
+							{#if promptPresets}
+								<div class="space-y-2 text-xs">
+									<label class="block">
+										<div class="mb-1 text-[10px] text-zinc-500">
+											选择模板（默认：{promptPresets.novel_to_script.default_preset_id ?? '（未设置）'}）
+										</div>
+										<select
+											class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 disabled:opacity-60"
+											bind:value={ntsPromptPresetIdDraft}
+											disabled={savingPromptPresets}
+										>
+											{#each promptPresets.novel_to_script.presets as preset (preset.id)}
+												<option value={preset.id}>{preset.name}</option>
+											{/each}
+										</select>
+									</label>
+
+									<label class="block">
+										<div class="mb-1 text-[10px] text-zinc-500">模板名称</div>
+										<input
+											class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
+											placeholder="例如：短剧默认 / 1章=1集 / 更炸裂"
+											bind:value={ntsPromptPresetNameDraft}
+											disabled={savingPromptPresets || !ntsPromptPresetIdDraft}
+										/>
+									</label>
+
+									<label class="block">
+										<div class="mb-1 text-[10px] text-zinc-500">模板内容（强约束，可留空）</div>
+									<textarea
+										class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										rows="6"
+										placeholder="例如：第X集；场号 X-Y；先 STEP1 列关键剧情，再 STEP2 写剧本；台词更直白更冲突…"
+										bind:value={ntsPromptPresetTextDraft}
+										disabled={savingPromptPresets || !ntsPromptPresetIdDraft}
+									></textarea>
+										<div class="mt-1 text-[10px] text-zinc-500">
+											提示：创建「小说→剧本」run 时会把这里注入 `output_spec.script_format_notes`；不再读取 Snapshot/Brief 的“格式备注”。
+										</div>
+									</label>
+
+									<div class="flex flex-wrap gap-2">
+										<button
+											class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+											onclick={() => saveSelectedPromptPreset('novel_to_script')}
+											disabled={savingPromptPresets || !ntsPromptPresetIdDraft}
+										>
+											保存模板
+										</button>
+										<button
+											class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+											onclick={() => addPromptPreset('novel_to_script')}
+											disabled={savingPromptPresets}
+										>
+											新建
+										</button>
+										<button
+											class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+											onclick={() => setDefaultPromptPreset('novel_to_script')}
+											disabled={savingPromptPresets || !ntsPromptPresetIdDraft}
+										>
+											设为默认
+										</button>
+										<button
+											class="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200 hover:bg-red-950/60 disabled:opacity-50"
+											onclick={() => deleteSelectedPromptPreset('novel_to_script')}
+											disabled={savingPromptPresets || !ntsPromptPresetIdDraft}
+										>
+											删除
+										</button>
+									</div>
+								</div>
+							{:else}
+								<div class="text-xs text-zinc-500">未加载（请检查 API 是否可用）</div>
+							{/if}
+						</div>
+					{/if}
+
+					{#if rightPaneTab === 'project'}
 						<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 text-xs font-semibold text-zinc-300">新建 Brief</div>
 							<div class="flex gap-2">
@@ -2633,7 +3072,7 @@
 						</div>
 					</div>
 
-					<div class="mb-3 text-xs font-semibold text-zinc-400">Briefs</div>
+					<div class="mb-3 text-xs font-semibold text-zinc-400">创作简报（Brief）</div>
 					<div class="space-y-1">
 						{#each briefs as brief (brief.id)}
 							<div class="flex gap-2">
@@ -2653,23 +3092,21 @@
 							</div>
 						{/each}
 						{#if briefs.length === 0}
-							<div class="text-xs text-zinc-500">暂无 briefs（可先用 API 创建）</div>
+							<div class="text-xs text-zinc-500">暂无简报，请先「新建 Brief」。</div>
 						{/if}
 					</div>
+					{/if}
 
-					{#if selectedBrief}
+					{#if selectedBrief && (rightPaneTab === 'project' || rightPaneTab === 'assets')}
+						{#if rightPaneTab === 'project'}
 						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 text-xs font-semibold text-zinc-300">输出偏好（本 Brief 覆盖）</div>
 							{#if globalOutputSpec}
 								{@const effective = effectiveOutputSpec()}
 								{#if effective}
 									<div class="mb-2 text-[11px] text-zinc-500">
-										Effective：{effective.language} · {effective.script_format}
-										· 自动修复 {effective.max_fix_attempts} 次 · step 重试{' '}
-										{effective.auto_step_retries} 次 · backoff {effective.auto_step_backoff_s}s
-										{#if effective.script_format_notes}
-											· {effective.script_format_notes}
-										{/if}
+										当前生效：{effective.language} · 自动修复 {effective.max_fix_attempts} 次 · 步骤重试{' '}
+										{effective.auto_step_retries} 次 · 退避 {effective.auto_step_backoff_s}s
 									</div>
 								{/if}
 							{/if}
@@ -2690,36 +3127,6 @@
 
 								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
 									<label class="flex items-center gap-2 text-zinc-200">
-										<input type="checkbox" bind:checked={overrideScriptFormat} />
-										<span>覆盖剧本格式</span>
-									</label>
-									<select
-										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 disabled:opacity-60"
-										bind:value={briefScriptFormatDraft}
-										disabled={!overrideScriptFormat || savingBriefPrefs}
-									>
-										<option value="screenplay_int_ext">影视剧本（INT/EXT）</option>
-										<option value="stage_play">舞台剧</option>
-										<option value="custom">自定义</option>
-									</select>
-								</div>
-
-								<div class="grid grid-cols-[1fr_2fr] items-start gap-2">
-									<label class="flex items-center gap-2 pt-1 text-zinc-200">
-										<input type="checkbox" bind:checked={overrideScriptNotes} />
-										<span>覆盖备注</span>
-									</label>
-									<textarea
-										class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
-										rows="3"
-										placeholder="可选：对 script_format 的补充说明"
-										bind:value={briefScriptNotesDraft}
-										disabled={!overrideScriptNotes || savingBriefPrefs}
-									></textarea>
-								</div>
-
-								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
-									<label class="flex items-center gap-2 text-zinc-200">
 										<input type="checkbox" bind:checked={overrideMaxFixAttempts} />
 										<span>覆盖自动修复次数</span>
 									</label>
@@ -2736,7 +3143,7 @@
 								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
 									<label class="flex items-center gap-2 text-zinc-200">
 										<input type="checkbox" bind:checked={overrideAutoStepRetries} />
-										<span>覆盖 step 重试次数</span>
+									<span>覆盖步骤重试次数</span>
 									</label>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
@@ -2751,7 +3158,7 @@
 								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
 									<label class="flex items-center gap-2 text-zinc-200">
 										<input type="checkbox" bind:checked={overrideAutoStepBackoff} />
-										<span>覆盖 step backoff（秒）</span>
+									<span>覆盖重试退避（秒）</span>
 									</label>
 									<input
 										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
@@ -2806,11 +3213,11 @@
 						</div>
 
 						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-							<div class="mb-2 text-xs font-semibold text-zinc-300">创建 Snapshot</div>
+							<div class="mb-2 text-xs font-semibold text-zinc-300">创建版本（Snapshot）</div>
 							<div class="flex gap-2">
 								<input
 									class="flex-1 rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600"
-									placeholder="label（可空，如 v1 / draft）"
+									placeholder="标签（可空，如 v1 / 草稿）"
 									bind:value={newSnapshotLabel}
 									disabled={creatingSnapshot}
 									onkeydown={(e) => e.key === 'Enter' && createNewSnapshot()}
@@ -2829,7 +3236,7 @@
 						</div>
 
 						<div class="mt-6">
-							<div class="mb-2 text-xs font-semibold text-zinc-400">Snapshots</div>
+							<div class="mb-2 text-xs font-semibold text-zinc-400">版本列表（Snapshot）</div>
 							<div class="space-y-1">
 								{#each briefSnapshots as snap (snap.id)}
 									<div class="flex gap-2">
@@ -2858,32 +3265,95 @@
 								{/if}
 							</div>
 						</div>
+						{/if}
+
+						{#if selectedSnapshot}
+							{#if rightPaneTab === 'project'}
+								<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+									<div class="mb-2 flex items-center justify-between gap-2">
+									<div class="text-xs font-semibold text-zinc-300">版本内容（Snapshot）</div>
+										<button
+											class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+											onclick={() => (showSnapshotJson = !showSnapshotJson)}
+										>
+											{showSnapshotJson ? '收起' : '展开'}
+										</button>
+									</div>
+									<div class="text-[10px] text-zinc-500">
+										已选：{selectedSnapshot.label ?? '（未命名）'} ·
+										{new Date(selectedSnapshot.created_at).toLocaleString()}
+									</div>
+									{#if showSnapshotJson}
+										<pre
+											class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] text-zinc-300">
+{JSON.stringify(selectedSnapshot.content, null, 2)}</pre>
+									{/if}
+								</div>
+							{/if}
+						{/if}
+					{/if}
+
+					{#if gapReport && rightPaneTab === 'project'}
+						<div class="mt-6">
+							<div
+								class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-400"
+							>
+								<span>简报缺口检查</span>
+								<span class="rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200"
+									>{gapReport.completeness}%</span
+								>
+							</div>
+
+							{#if gapReport.conflict.length > 0}
+								<div
+									class="mb-2 rounded-md border border-red-900/40 bg-red-950/40 px-3 py-2 text-xs"
+								>
+									<div class="mb-1 font-semibold text-red-200">冲突</div>
+									<ul class="list-disc space-y-0.5 pl-4 text-red-100">
+										{#each gapReport.conflict as f (f)}
+											<li>{f}</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+
+							{#if gapReport.missing.length > 0}
+								<div
+									class="mb-2 rounded-md border border-amber-900/40 bg-amber-950/30 px-3 py-2 text-xs"
+								>
+									<div class="mb-1 font-semibold text-amber-200">缺失</div>
+									<ul class="list-disc space-y-0.5 pl-4 text-amber-100">
+										{#each gapReport.missing as f (f)}
+											<li>{f}</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+
+							{#if gapReport.questions.length > 0}
+								<div class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs">
+									<div class="mb-1 font-semibold text-zinc-300">追问</div>
+									<ul class="list-disc space-y-0.5 pl-4 text-zinc-200">
+										{#each gapReport.questions as q (q)}
+											<li>{q}</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					{#if rightPaneTab === 'assets'}
+						{#if !selectedSnapshot}
+							<div class="rounded-md border border-zinc-800 bg-zinc-900 p-3 text-xs text-zinc-500">
+								请先在「项目」选择 Brief，并创建/选择一个 Snapshot，才能查看作品资产。
+							</div>
+						{/if}
 
 						{#if selectedSnapshot}
 							<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 								<div class="mb-2 flex items-center justify-between gap-2">
-									<div class="text-xs font-semibold text-zinc-300">Snapshot 内容</div>
-									<button
-										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
-										onclick={() => (showSnapshotJson = !showSnapshotJson)}
-									>
-										{showSnapshotJson ? '收起' : '展开'}
-									</button>
-								</div>
-								<div class="text-[10px] text-zinc-500">
-									已选：{selectedSnapshot.label ?? '（未命名）'} ·
-									{new Date(selectedSnapshot.created_at).toLocaleString()}
-								</div>
-								{#if showSnapshotJson}
-									<pre
-										class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] text-zinc-300">
-{JSON.stringify(selectedSnapshot.content, null, 2)}</pre>
-								{/if}
-							</div>
-
-							<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-								<div class="mb-2 flex items-center justify-between gap-2">
-									<div class="text-xs font-semibold text-zinc-300">KG / Lint</div>
+									<div class="text-xs font-semibold text-zinc-300">一致性检查（KG / Lint）</div>
 									<button
 										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
 										onclick={refreshAnalysis}
@@ -2894,19 +3364,31 @@
 								</div>
 
 								<div class="mb-3 text-[11px] text-zinc-500">
-									已选 Snapshot：{selectedSnapshot.label ?? '（未命名）'} ·
+									已选版本：{selectedSnapshot.label ?? '（未命名）'} ·
 									{new Date(selectedSnapshot.created_at).toLocaleString()}
 								</div>
+
+								<div class="mb-3 text-[10px] text-zinc-500">
+									「运行」会基于当前版本做一致性检查并生成问题列表；「重建」会从产物中抽取实体更新知识图谱。点击带“跳转”的问题可定位到对应产物版本。
+								</div>
+								<details class="mb-4 text-[10px] text-zinc-500">
+									<summary class="cursor-pointer select-none text-zinc-400">怎么用（示例）</summary>
+									<div class="mt-2 space-y-1">
+										<div>1) 每生成几章/几集后点「运行」，检查在场/时间线/物品等是否冲突。</div>
+										<div>2) 需要实体列表或更强检查时点「重建」。</div>
+										<div>3) 勾选「LLM 辅助」可发现更多软问题（更慢）；取消则更快更稳。</div>
+									</div>
+								</details>
 
 								<div class="mb-5">
 									<div class="mb-2 flex items-center justify-between gap-2">
 										<div class="text-[11px] font-semibold text-zinc-400">
-											Lint Issues（{lintIssues.length}）
+											一致性问题（{lintIssues.length}）
 										</div>
 										<div class="flex items-center gap-2">
 											<label class="flex items-center gap-1 text-[10px] text-zinc-400">
 												<input type="checkbox" bind:checked={lintUseLlm} />
-												<span>LLM</span>
+												<span>LLM 辅助</span>
 											</label>
 											<button
 												class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold hover:bg-emerald-600 disabled:opacity-50"
@@ -2930,7 +3412,7 @@
 												>
 													<div class="flex items-center justify-between gap-2">
 														<div class="truncate text-[11px] font-semibold text-zinc-200">
-															{issue.severity} · {issue.code}
+															{lintSeverityLabel(issue.severity)} · {issue.code}
 														</div>
 														{#if issue.artifact_version_id}
 															<div class="text-[10px] text-zinc-500">跳转</div>
@@ -2943,14 +3425,14 @@
 											{/each}
 										</div>
 									{:else}
-										<div class="text-xs text-zinc-500">暂无 issues（可点击“运行”生成）。</div>
+										<div class="text-xs text-zinc-500">暂无问题（可点击“运行”生成）。</div>
 									{/if}
 								</div>
 
 								<div>
 									<div class="mb-2 flex items-center justify-between gap-2">
 										<div class="text-[11px] font-semibold text-zinc-400">
-											KG Entities（{knowledgeGraph?.entities.length ?? 0}）
+											知识图谱实体（{knowledgeGraph?.entities.length ?? 0}）
 										</div>
 										<button
 											class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
@@ -2988,7 +3470,7 @@
 
 							<div class="mt-4 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 								<div class="mb-2 flex items-center justify-between gap-2">
-									<div class="text-xs font-semibold text-zinc-300">Open Threads</div>
+									<div class="text-xs font-semibold text-zinc-300">伏笔 / 线索</div>
 									<button
 										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
 										onclick={refreshAnalysis}
@@ -2997,6 +3479,19 @@
 										刷新
 									</button>
 								</div>
+
+								<div class="mb-3 text-[10px] text-zinc-500">
+									用于管理跨章伏笔/线索：记录“引入→强化→回收”，并把每一步引用到具体产物版本，方便回溯与核对是否回收。
+								</div>
+								<details class="mb-4 text-[10px] text-zinc-500">
+									<summary class="cursor-pointer select-none text-zinc-400">怎么用（示例）</summary>
+									<div class="mt-2 space-y-1">
+										<div>例：线索「苏青背后的无脸厉鬼」</div>
+										<div>1) 第1集首次出现：添加引用，类型选「引入」</div>
+										<div>2) 第3集再出现/升级：再加一条引用，类型选「强化」</div>
+										<div>3) 第10集解决：添加引用，类型选「回收」，并把线索状态改为「已回收」</div>
+									</div>
+								</details>
 
 								<div class="mb-4">
 									<div class="mb-2 text-[11px] font-semibold text-zinc-400">新建线索</div>
@@ -3039,7 +3534,7 @@
 													<div class="flex items-center justify-between gap-2">
 														<div class="truncate text-[11px] text-zinc-200">{t.title}</div>
 														<div class="rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200">
-															{t.status}
+															{openThreadStatusLabel(t.status)}
 														</div>
 													</div>
 													{#if t.description}
@@ -3084,7 +3579,7 @@
 													>
 														<div class="flex items-center justify-between gap-2">
 															<div class="truncate text-[11px] text-zinc-200">
-																{r.ref_kind} · {r.artifact_version_id}
+																{openThreadRefKindLabel(r.ref_kind)} · {r.artifact_version_id}
 															</div>
 															<div class="text-[10px] text-zinc-500">跳转</div>
 														</div>
@@ -3106,7 +3601,7 @@
 												<div class="flex gap-2">
 													<input
 														class="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600"
-														placeholder="artifact_version_id"
+														placeholder="产物版本 ID（artifact_version_id）"
 														bind:value={refArtifactVersionIdDraft}
 														disabled={addingThreadRef}
 													/>
@@ -3124,9 +3619,9 @@
 														bind:value={refKindDraft}
 														disabled={addingThreadRef}
 													>
-														<option value="introduced">introduced</option>
-														<option value="reinforced">reinforced</option>
-														<option value="resolved">resolved</option>
+														<option value="introduced">引入（introduced）</option>
+														<option value="reinforced">强化（reinforced）</option>
+														<option value="resolved">回收（resolved）</option>
 													</select>
 													<button
 														class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
@@ -3140,7 +3635,7 @@
 												<textarea
 													class="w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 disabled:opacity-60"
 													rows="2"
-													placeholder="quote（可选）"
+													placeholder="引用摘录（可选）"
 													bind:value={refQuoteDraft}
 													disabled={addingThreadRef}
 												></textarea>
@@ -3154,6 +3649,19 @@
 								<div class="mb-2 flex items-center justify-between gap-2">
 									<div class="text-xs font-semibold text-zinc-300">导出 / 术语表</div>
 								</div>
+
+								<div class="mb-3 text-[10px] text-zinc-500">
+									导出会汇总当前版本下已生成的小说/剧本内容；勾选「导出时应用术语表」会在导出时做全文替换（不改原文）。
+								</div>
+								<details class="mb-4 text-[10px] text-zinc-500">
+									<summary class="cursor-pointer select-none text-zinc-400">格式说明</summary>
+									<div class="mt-2 space-y-1">
+										<div>小说 .md：适合排版与复制（Markdown）</div>
+										<div>小说 .txt：纯文本</div>
+										<div>剧本 .txt：纯文本</div>
+										<div>剧本 Fountain：Fountain 标记语言，便于后续导入/排版（如 Final Draft 等）</div>
+									</div>
+								</details>
 
 								<div class="mb-3 flex items-center justify-between gap-2">
 									<label class="flex items-center gap-2 text-[11px] text-zinc-400">
@@ -3219,13 +3727,13 @@
 									<div class="space-y-2">
 										<input
 											class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 disabled:opacity-60"
-											placeholder="term（例如：旧城）"
+											placeholder="术语（例如：旧城）"
 											bind:value={glossaryTermDraft}
 											disabled={creatingGlossaryEntry}
 										/>
 										<input
 											class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 disabled:opacity-60"
-											placeholder="replacement（例如：新城）"
+											placeholder="替换为（例如：新城）"
 											bind:value={glossaryReplacementDraft}
 											disabled={creatingGlossaryEntry}
 										/>
@@ -3241,101 +3749,51 @@
 									</div>
 								</div>
 							</div>
-						{/if}
-					{/if}
 
-					{#if gapReport}
-						<div class="mt-6">
-							<div
-								class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-400"
-							>
-								<span>Gap Report</span>
-								<span class="rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-200"
-									>{gapReport.completeness}%</span
-								>
-							</div>
-
-							{#if gapReport.conflict.length > 0}
-								<div
-									class="mb-2 rounded-md border border-red-900/40 bg-red-950/40 px-3 py-2 text-xs"
-								>
-									<div class="mb-1 font-semibold text-red-200">冲突</div>
-									<ul class="list-disc space-y-0.5 pl-4 text-red-100">
-										{#each gapReport.conflict as f (f)}
-											<li>{f}</li>
-										{/each}
-									</ul>
-								</div>
-							{/if}
-
-							{#if gapReport.missing.length > 0}
-								<div
-									class="mb-2 rounded-md border border-amber-900/40 bg-amber-950/30 px-3 py-2 text-xs"
-								>
-									<div class="mb-1 font-semibold text-amber-200">缺失</div>
-									<ul class="list-disc space-y-0.5 pl-4 text-amber-100">
-										{#each gapReport.missing as f (f)}
-											<li>{f}</li>
-										{/each}
-									</ul>
-								</div>
-							{/if}
-
-							{#if gapReport.questions.length > 0}
-								<div class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs">
-									<div class="mb-1 font-semibold text-zinc-300">追问</div>
-									<ul class="list-disc space-y-0.5 pl-4 text-zinc-200">
-										{#each gapReport.questions as q (q)}
-											<li>{q}</li>
-										{/each}
-									</ul>
-								</div>
-							{/if}
-						</div>
-					{/if}
-
-					<div class="mt-8 mb-3 text-xs font-semibold text-zinc-400">Artifacts</div>
-					<div class="space-y-1">
-						{#each artifacts as artifact (artifact.id)}
-								<button
-									class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
-									onclick={() => selectArtifact(artifact, selectedSnapshot?.id ?? null)}
-								>
-								<span class="truncate">{artifact.title ?? artifact.kind}</span>
-								<span class="ml-2 text-[10px] text-zinc-500">
-									{artifact.ordinal ?? ''}
-								</span>
-							</button>
-						{/each}
-						{#if artifacts.length === 0}
-							<div class="text-xs text-zinc-500">暂无 artifacts（可先用 API 创建）</div>
-						{/if}
-					</div>
-
-					{#if selectedArtifact}
-						<div class="mt-6">
-							<div class="mb-2 text-xs font-semibold text-zinc-400">Versions</div>
+							<div class="mt-8 mb-3 text-xs font-semibold text-zinc-400">产物（Artifacts）</div>
 							<div class="space-y-1">
-								{#each artifactVersions as v (v.id)}
-									<button
-										class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
-										class:border-emerald-700={selectedArtifactVersion?.id === v.id}
-										onclick={() => selectArtifactVersion(v)}
-									>
-										<div class="flex items-center justify-between">
-											<div class="truncate">{v.source}</div>
-											<div class="text-[10px] text-zinc-500">
-												{new Date(v.created_at).toLocaleString()}
-											</div>
-										</div>
-										<div class="mt-1 line-clamp-2 text-[11px] text-zinc-400">{v.content_text}</div>
+								{#each artifacts as artifact (artifact.id)}
+										<button
+											class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
+											onclick={() => selectArtifact(artifact, selectedSnapshot?.id ?? null)}
+										>
+										<span class="truncate">{artifact.title ?? artifact.kind}</span>
+										<span class="ml-2 text-[10px] text-zinc-500">
+											{artifact.ordinal ?? ''}
+										</span>
 									</button>
 								{/each}
-								{#if artifactVersions.length === 0}
-									<div class="text-xs text-zinc-500">暂无 versions</div>
+								{#if artifacts.length === 0}
+									<div class="text-xs text-zinc-500">暂无产物（可先运行工作流生成）。</div>
 								{/if}
 							</div>
-						</div>
+						{/if}
+
+						{#if selectedArtifact}
+							<div class="mt-6">
+								<div class="mb-2 text-xs font-semibold text-zinc-400">版本（Versions）</div>
+								<div class="space-y-1">
+									{#each artifactVersions as v (v.id)}
+										<button
+											class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-800"
+											class:border-emerald-700={selectedArtifactVersion?.id === v.id}
+											onclick={() => selectArtifactVersion(v)}
+										>
+											<div class="flex items-center justify-between">
+												<div class="truncate">{artifactSourceLabel(v.source)}</div>
+												<div class="text-[10px] text-zinc-500">
+													{new Date(v.created_at).toLocaleString()}
+												</div>
+											</div>
+											<div class="mt-1 line-clamp-2 text-[11px] text-zinc-400">{v.content_text}</div>
+										</button>
+									{/each}
+									{#if artifactVersions.length === 0}
+										<div class="text-xs text-zinc-500">暂无版本</div>
+									{/if}
+								</div>
+							</div>
+						{/if}
 					{/if}
 				</div>
 			</section>

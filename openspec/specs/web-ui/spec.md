@@ -12,16 +12,16 @@ The web UI SHALL allow the user to create Briefs and Snapshots and to edit prefe
 - **AND** the UI SHALL allow editing `auto_step_retries` and `auto_step_backoff_s` as part of preferences
 
 ### Requirement: UI can create novel→script runs
-The web UI SHALL allow the user to create and run `novel_to_script` workflow runs from a selected brief snapshot, and SHALL allow configuring source snapshot and conversion rules at run creation time.
+The web UI SHALL allow the user to create and run `novel_to_script` workflow runs from a selected brief snapshot, and SHALL allow configuring source snapshot and prompt preset at run creation time.
 
 #### Scenario: Create a novel→script run
 - **WHEN** the user selects a snapshot and chooses “小说→剧本”
 - **THEN** the UI SHALL create a workflow run and allow stepwise execution
 
-#### Scenario: Leave conversion notes blank to use lower-precedence notes
-- **GIVEN** the user selects “小说→剧本”
-- **WHEN** the user leaves conversion notes blank
-- **THEN** the created run SHALL omit run-level notes so the backend can apply snapshot/brief notes (or global defaults if snapshot notes are missing)
+#### Scenario: Select a prompt preset (or use default) when creating a novel→script run
+- **GIVEN** prompt presets exist in Settings
+- **WHEN** the user creates a novel→script run without choosing a preset explicitly
+- **THEN** the UI SHALL omit `prompt_preset_id` so the backend can apply the global default preset
 
 ### Requirement: UI shows live workflow progress without polling
 The web UI SHALL display live workflow progress updates using SSE.
@@ -129,4 +129,51 @@ The web UI SHALL provide an editor for the global novel→script prompt defaults
 #### Scenario: Edit global novel→script prompt defaults
 - **WHEN** the user edits and saves the global novel→script prompt defaults in the UI
 - **THEN** the UI SHALL persist the value via the settings API
+
+### Requirement: UI manages global prompt preset catalogs
+The web UI SHALL allow the user to manage global prompt preset catalogs for direct script generation and novel→script conversion.
+
+#### Scenario: Edit prompt presets in settings
+- **WHEN** the user adds/edits/deletes presets and sets the default preset in the Settings tab
+- **THEN** the UI SHALL persist changes via the settings API
+
+### Requirement: UI selects a prompt preset when creating script/novel→script runs
+The web UI SHALL allow selecting a prompt preset when creating `script` and `novel_to_script` workflow runs.
+
+#### Scenario: Create a script run with a selected preset
+- **WHEN** the user selects “剧本” and chooses a prompt preset
+- **THEN** the UI SHALL create a workflow run with `prompt_preset_id`
+
+### Requirement: Right pane groups content into Project / Assets / Settings
+The UI SHALL provide a clear separation of right-pane content into three groups so that project management, story assets, and global settings are not mixed in a single long scroll.
+
+#### Scenario: Switch right pane tabs
+- **GIVEN** the user is using the IDE UI
+- **WHEN** the user selects a right-pane tab (Project / Assets / Settings)
+- **THEN** the UI SHALL show only the panels relevant to that group
+- **AND** the UI SHOULD remember the last selected tab locally for the next visit
+
+### Requirement: UI uses Chinese labels for user-facing workflow and asset terms
+The UI SHALL present user-facing labels in Chinese for common workflow and asset concepts.
+
+#### Scenario: Translate workflow labels and statuses
+- **WHEN** the UI renders workflow runs, steps, and controls
+- **THEN** the UI SHALL display Chinese labels for names and statuses (while preserving internal enum values)
+
+#### Scenario: Translate common configuration field labels
+- **WHEN** the UI renders provider and preference settings
+- **THEN** labels such as `Base URL`, `Chat Model`, `Embeddings Model`, `Timeout`, `Max Retries`, and `default` SHALL be displayed as clear Chinese equivalents
+
+### Requirement: UI provides contextual help text for advanced panels
+The UI SHALL provide short, grey helper text (and/or an expand/collapse help block) for panels that require user knowledge, so the user can understand what the feature does and how to use it.
+
+#### Scenario: Open Threads panel explains usage with an example
+- **GIVEN** the user opens the Open Threads (伏笔/线索) panel
+- **THEN** the UI SHALL explain what a thread is, how to create one, and how to add references
+- **AND** the UI SHALL explain the meaning of `introduced/reinforced/resolved` with a short example workflow
+
+#### Scenario: KG/Lint panel explains when to run and how to jump
+- **GIVEN** the user opens the KG/Lint panel
+- **THEN** the UI SHALL explain the difference between “重建/运行” actions and the expected result
+- **AND** the UI SHALL explain that clicking an issue can jump to the referenced artifact version (when available)
 
