@@ -18,11 +18,10 @@ The web UI SHALL allow the user to create and run `novel_to_script` workflow run
 - **WHEN** the user selects a snapshot and chooses “小说→剧本”
 - **THEN** the UI SHALL create a workflow run and allow stepwise execution
 
-#### Scenario: Create a novel→script run with source snapshot and conversion notes
+#### Scenario: Leave conversion notes blank to use lower-precedence notes
 - **GIVEN** the user selects “小说→剧本”
-- **WHEN** the user selects a novel source Snapshot (may differ from the run Snapshot)
-- **AND** the user enters conversion notes (e.g., short-drama formatting rules)
-- **THEN** the UI SHALL create the run with `source_brief_snapshot_id` and `conversion_output_spec` populated
+- **WHEN** the user leaves conversion notes blank
+- **THEN** the created run SHALL omit run-level notes so the backend can apply snapshot/brief notes (or global defaults if snapshot notes are missing)
 
 ### Requirement: UI shows live workflow progress without polling
 The web UI SHALL display live workflow progress updates using SSE.
@@ -105,10 +104,15 @@ The web UI SHALL provide delete actions for Briefs, Snapshots, and Workflow Runs
 ### Requirement: UI displays workflow runs with Chinese, phase-aware names
 The web UI SHALL display workflow run list items using Chinese labels derived from workflow kind and current cursor phase/index.
 
-#### Scenario: Show novel chapter progress label
-- **GIVEN** a novel workflow run has cursor phase `novel_chapter_draft` and `chapter_index=3`
+#### Scenario: Show novel→script episode progress label
+- **GIVEN** a novel→script workflow run has cursor phase `nts_episode_draft` and `chapter_index=3`
 - **WHEN** the UI renders the workflow run list
-- **THEN** the run SHALL be labeled similar to `小说 · 第3章 · 草稿`
+- **THEN** the run SHALL be labeled similar to `小说→剧本 · 第3集 · 草稿`
+
+#### Scenario: Show episode breakdown label
+- **GIVEN** a novel→script workflow run has cursor phase `nts_episode_breakdown` and `chapter_index=1`
+- **WHEN** the UI renders the workflow run list
+- **THEN** the run SHALL be labeled similar to `小说→剧本 · 第1集 · 拆解`
 
 ### Requirement: UI supports workflow node intervention chat
 The web UI SHALL provide a “节点对话干预” panel when a workflow run is selected, allowing the user to send an instruction and apply the resulting state patch.
@@ -118,4 +122,11 @@ The web UI SHALL provide a “节点对话干预” panel when a workflow run is
 - **WHEN** the user sends an intervention instruction
 - **THEN** the UI SHALL call the intervention API
 - **AND** the UI SHALL refresh run state and step history
+
+### Requirement: UI can configure global novel→script prompt defaults
+The web UI SHALL provide an editor for the global novel→script prompt defaults.
+
+#### Scenario: Edit global novel→script prompt defaults
+- **WHEN** the user edits and saves the global novel→script prompt defaults in the UI
+- **THEN** the UI SHALL persist the value via the settings API
 

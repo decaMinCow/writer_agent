@@ -363,11 +363,16 @@ async def workflow_run_events(
     run_id: uuid.UUID,
     request: Request,
     once: bool = False,
-    session: AsyncSession = Depends(get_db_session),
 ) -> StreamingResponse:
-    run = await session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="workflow_run_not_found")
+    # NOTE: Do not keep a DB session open for the lifetime of an SSE connection.
+    sessionmaker = getattr(request.app.state, "sessionmaker", None)
+    if sessionmaker is None:
+        raise HTTPException(status_code=500, detail="db_not_initialized")
+
+    async with sessionmaker() as session:
+        run = await session.get(WorkflowRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="workflow_run_not_found")
 
     hub = getattr(request.app.state, "workflow_event_hub", None)
     if hub is None:
@@ -448,18 +453,26 @@ async def create_step_run(
 @router.get("/{run_id}/steps", response_model=list[WorkflowStepRunRead])
 async def list_step_runs(
     run_id: uuid.UUID,
+    limit: int = 200,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[WorkflowStepRunRead]:
     run = await session.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="workflow_run_not_found")
 
+    # Some runs can accumulate a very large number of step rows (e.g. long autoruns).
+    # Returning every step can freeze the API/UI. Default to the latest N steps.
+    limit = _coerce_int(limit, default=200, min_value=1)
+    limit = min(limit, 2000)
+
     result = await session.execute(
         select(WorkflowStepRun)
         .where(WorkflowStepRun.workflow_run_id == run.id)
-        .order_by(WorkflowStepRun.step_index.asc().nullslast(), WorkflowStepRun.created_at.asc())
+        .order_by(WorkflowStepRun.step_index.desc().nullslast(), WorkflowStepRun.created_at.desc())
+        .limit(limit)
     )
-    items = result.scalars().all()
+    items = list(result.scalars().all())
+    items.reverse()
     return [WorkflowStepRunRead.model_validate(item) for item in items]
 
 

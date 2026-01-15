@@ -1,0 +1,17 @@
+Brief Snapshot JSON：
+{{BRIEF_JSON}}
+
+CurrentState JSON：
+{{CURRENT_STATE_JSON}}
+
+Episode meta：
+{{EPISODE_JSON}}
+
+前情（已提交剧本集的事实摘要，供保持连续性；可为空）：
+{{PREV_EPISODE_DIGESTS_TEXT}}
+
+CHAPTER_TEXT（本章全文，事实来源）：
+{{CHAPTER_TEXT}}
+
+请输出 Episode Breakdown JSON。
+

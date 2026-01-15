@@ -279,7 +279,12 @@ async def test_novel_to_script_fails_when_no_novel_sources(client_with_llm_and_e
 
     run = await client_with_llm_and_embeddings.post(
         "/api/workflow-runs",
-        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
     )
     run_id = run.json()["id"]
 
@@ -328,7 +333,12 @@ async def test_novel_to_script_prefers_snapshot_notes_over_global_when_run_notes
 
     run = await client_with_llm_and_embeddings.post(
         "/api/workflow-runs",
-        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
     )
     run_id = run.json()["id"]
 
@@ -396,7 +406,12 @@ async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_an
 
     run = await client_with_llm_and_embeddings.post(
         "/api/workflow-runs",
-        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
     )
     run_id = run.json()["id"]
 
@@ -426,6 +441,358 @@ async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_an
     assert "GLOBAL NTS RULES" in prompt
 
 
+async def test_novel_to_script_format_guard_triggers_fix_when_multiple_scene_blocks_present(
+    client_with_llm_and_embeddings, llm_stub
+):
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={
+            "title": "测试作品",
+            "content": {"output_spec": {"script_format": "custom"}},
+        },
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "开场",
+                        "location": "杂货铺",
+                        "time": "黄昏",
+                        "characters": ["陈皮"],
+                        "purpose": "交代背景。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    first = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert first.status_code == 200
+    assert first.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_draft"
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "text": "1-1\n日\n内\n地点：杂货铺\n出场人物：陈皮\n\n陈皮：开场。\n\n1-2\n日\n内\n地点：杂货铺\n出场人物：陈皮\n\n陈皮：这不该出现。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    second = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert second.status_code == 200
+    assert second.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_critic"
+
+    third = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert third.status_code == 200
+    body = third.json()
+    assert body["run"]["state"]["cursor"]["phase"] == "nts_scene_fix"
+    assert body["step"]["outputs"]["hard_pass"] is False
+    assert "format_multiple_scene_blocks" in body["step"]["outputs"]["hard_errors"]
+
+
+async def test_novel_to_script_format_guard_persists_phase_change_when_only_cursor_changes(
+    client_with_llm_and_embeddings,
+):
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}},
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    draft_text = "11-1\n\n第一段。\n\n11-2\n\n第二段。"
+    # Pre-seed a critic payload that matches the deterministic format-guard response,
+    # so the only state delta is cursor.phase (critic->fix).
+    seeded_critic = {
+        "hard_pass": False,
+        "hard_errors": ["format_multiple_scene_blocks"],
+        "soft_scores": {"format": 0},
+        "rewrite_paragraph_indices": [1, 2, 3, 4],
+        "rewrite_instructions": (
+            "格式修复：只输出一个场景的剧本正文，不要包含任何提示词/规则/执行流程/STEP1/STEP2。"
+            "本场是 ep11_s01《鬼将袭来》，地点：黄昏杂货铺，时间：夜，人物：陈皮, 林小鱼, 罗刹, 花姐。"
+            "如果草稿里出现了多个场景编号（例如 1-1/1-2…）或多个 INT./EXT. 标题，只保留与本场相关的一个，删除其余。"
+        ),
+        "fact_digest": "",
+        "tone_digest": "",
+        "state_patch": {},
+    }
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {
+                "conversion_output_spec": {"script_format": "custom"},
+                "cursor": {"phase": "nts_scene_critic", "scene_index": 1},
+                "scene_list": {
+                    "scenes": [
+                        {
+                            "index": 1,
+                            "slug": "ep11_s01",
+                            "title": "鬼将袭来",
+                            "location": "黄昏杂货铺",
+                            "time": "夜",
+                            "characters": ["陈皮", "林小鱼", "罗刹", "花姐"],
+                            "purpose": "制造危机。",
+                        }
+                    ]
+                },
+                "draft": {"kind": "scene", "index": 1, "slug": "ep11_s01", "text": draft_text},
+                "critic": seeded_critic,
+                "fix_attempt": 1,
+            },
+        },
+    )
+    run_id = run.json()["id"]
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["step"]["step_name"] == "nts_scene_critic"
+    assert body["run"]["state"]["cursor"]["phase"] == "nts_scene_fix"
+
+
+async def test_novel_to_script_format_autofix_trims_to_single_scene_block(
+    client_with_llm_and_embeddings, llm_stub
+):
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={
+            "title": "测试作品",
+            "content": {"output_spec": {"script_format": "custom"}},
+        },
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "ep11_s01",
+                        "title": "开场",
+                        "location": "杂货铺",
+                        "time": "黄昏",
+                        "characters": ["陈皮"],
+                        "purpose": "交代背景。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    first = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert first.status_code == 200
+    assert first.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_draft"
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "text": "11-1\n日\n内\n地点：杂货铺\n出场人物：陈皮\n\n陈皮：开场。\n\n11-2\n夜\n内\n地点：杂货铺\n出场人物：陈皮\n\n陈皮：第二场。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    second = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert second.status_code == 200
+    assert second.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_critic"
+
+    third = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert third.status_code == 200
+    assert third.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_fix"
+
+    before_fix_calls = len(llm_stub.calls)
+    fourth = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert fourth.status_code == 200
+    body = fourth.json()
+    assert body["step"]["step_name"] == "nts_scene_fix"
+    assert body["step"]["outputs"]["auto_format_fix_applied"] is True
+    assert body["run"]["state"]["cursor"]["phase"] == "nts_scene_critic"
+    assert "11-2" not in body["run"]["state"]["draft"]["text"]
+    assert "第二场" not in body["run"]["state"]["draft"]["text"]
+    assert len(llm_stub.calls) == before_fix_calls
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "hard_pass": True,
+                "hard_errors": [],
+                "soft_scores": {"format": 90},
+                "rewrite_paragraph_indices": [],
+                "rewrite_instructions": "",
+                "fact_digest": "开场交代背景。",
+                "tone_digest": "紧张。",
+                "state_patch": {},
+            },
+            ensure_ascii=False,
+        )
+    )
+    fifth = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert fifth.status_code == 200
+    assert fifth.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_commit"
+
+    sixth = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert sixth.status_code == 200
+    assert sixth.json()["run"]["status"] == "succeeded"
+
+
+async def test_novel_to_script_critic_backfills_rewrite_indices_when_missing(
+    client_with_llm_and_embeddings, llm_stub
+):
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={
+            "title": "测试作品",
+            "content": {"output_spec": {"script_format": "custom"}},
+        },
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "开场",
+                        "location": "杂货铺",
+                        "time": "黄昏",
+                        "characters": ["陈皮"],
+                        "purpose": "交代背景。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    llm_stub.outputs.append(json.dumps({"text": "第一段。\n\n第二段。"}, ensure_ascii=False))
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "hard_pass": False,
+                "hard_errors": ["world_rule_violation"],
+                "soft_scores": {"fidelity": 50},
+                "rewrite_paragraph_indices": [],
+                "rewrite_instructions": "请按小说事实修复冲突。",
+                "fact_digest": "",
+                "tone_digest": "",
+                "state_patch": {},
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    step1 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step1.status_code == 200
+    assert step1.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_draft"
+
+    step2 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step2.status_code == 200
+    assert step2.json()["run"]["state"]["cursor"]["phase"] == "nts_scene_critic"
+
+    step3 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step3.status_code == 200
+    body = step3.json()
+    assert body["run"]["state"]["cursor"]["phase"] == "nts_scene_fix"
+    assert body["run"]["state"]["critic"]["rewrite_paragraph_indices"] == [1, 2]
+
+
 async def test_novel_to_script_retry_resets_failed_cursor_phase(client_with_llm_and_embeddings, llm_stub):
     brief = await client_with_llm_and_embeddings.post("/api/briefs", json={"title": "测试作品", "content": {}})
     brief_id = brief.json()["id"]
@@ -434,7 +801,12 @@ async def test_novel_to_script_retry_resets_failed_cursor_phase(client_with_llm_
 
     run = await client_with_llm_and_embeddings.post(
         "/api/workflow-runs",
-        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
     )
     run_id = run.json()["id"]
 
@@ -520,7 +892,7 @@ async def test_novel_to_script_can_use_different_source_snapshot(client_with_llm
             "brief_snapshot_id": run_id,
             "source_brief_snapshot_id": source_id,
             "status": "queued",
-            "state": {},
+            "state": {"cursor": {"phase": "nts_scene_list"}},
         },
     )
     workflow_run_id = run.json()["id"]
@@ -587,7 +959,12 @@ async def test_novel_to_script_uses_latest_chapter_versions_for_scene_list(
 
     run = await client_with_llm_and_embeddings.post(
         "/api/workflow-runs",
-        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
     )
     run_id = run.json()["id"]
 
@@ -646,7 +1023,12 @@ async def test_novel_to_script_happy_path_and_honors_script_format(
 
     run = await client_with_llm_and_embeddings.post(
         "/api/workflow-runs",
-        json={"kind": "novel_to_script", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
     )
     run_id = run.json()["id"]
 
@@ -706,6 +1088,94 @@ async def test_novel_to_script_happy_path_and_honors_script_format(
     assert "artifact_version_id" in step4.json()["step"]["outputs"]
 
 
+async def test_novel_to_script_critic_allows_null_rewrite_instructions(client_with_llm_and_embeddings, llm_stub):
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={"title": "测试作品", "content": {"output_spec": {"script_format": "stage_play"}}},
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    artifact = await client_with_llm_and_embeddings.post(
+        "/api/artifacts",
+        json={"kind": "novel_chapter", "ordinal": 1, "title": "第一章"},
+    )
+    artifact_id = artifact.json()["id"]
+    await client_with_llm_and_embeddings.post(
+        f"/api/artifacts/{artifact_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一章内容",
+            "metadata": {"fact_digest": "主角夜里接到电话。"},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {"cursor": {"phase": "nts_scene_list"}},
+        },
+    )
+    run_id = run.json()["id"]
+
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "index": 1,
+                        "slug": "s01",
+                        "title": "夜里来电",
+                        "location": "公寓客厅",
+                        "time": "夜",
+                        "characters": ["主角"],
+                        "purpose": "引入悬念。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    llm_stub.outputs.append(json.dumps({"text": "【场景一】\\n主角接起电话。"}, ensure_ascii=False))
+    llm_stub.outputs.append(
+        json.dumps(
+            {
+                "hard_pass": True,
+                "hard_errors": [],
+                "soft_scores": {"fidelity": 80},
+                "rewrite_paragraph_indices": [],
+                "rewrite_instructions": None,
+                "fact_digest": "主角夜里接到电话。",
+                "tone_digest": "",
+                "state_patch": {},
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    step1 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step1.status_code == 200
+    assert step1.json()["step"]["status"] == "succeeded"
+
+    step2 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step2.status_code == 200
+    assert step2.json()["step"]["status"] == "succeeded"
+
+    step3 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step3.status_code == 200
+    assert step3.json()["step"]["status"] == "succeeded"
+
+    step4 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert step4.status_code == 200
+    assert step4.json()["run"]["status"] == "succeeded"
+    assert "artifact_version_id" in step4.json()["step"]["outputs"]
+
+
 async def test_novel_to_script_conversion_output_spec_overrides_snapshot(client_with_llm_and_embeddings, llm_stub):
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
@@ -748,26 +1218,25 @@ async def test_novel_to_script_conversion_output_spec_overrides_snapshot(client_
     llm_stub.outputs.append(
         json.dumps(
             {
-                "scenes": [
-                    {
-                        "index": 1,
-                        "slug": "s01",
-                        "title": "夜里来电",
-                        "location": "公寓客厅",
-                        "time": "夜",
-                        "characters": ["主角"],
-                        "purpose": "引入悬念。",
-                    }
-                ]
+                "episode_index": 1,
+                "chapter_title": "第一章",
+                "key_events": ["主角夜里接到电话。"],
+                "conflicts": ["未知来电引发危机。"],
+                "emotional_beats": ["紧张。"],
+                "relationship_changes": [],
+                "hook_idea": "电话那头不是人。",
             },
             ensure_ascii=False,
         )
     )
-    llm_stub.outputs.append(json.dumps({"text": "【场景一】\\n主角接起电话。"}, ensure_ascii=False))
+    llm_stub.outputs.append(
+        json.dumps({"title": "夜里来电", "text": "第1集 夜里来电\\n\\n1.1\\n夜\\n内\\n地点：公寓客厅\\n出场人物：主角\\n\\n主角：谁？"}, ensure_ascii=False)
+    )
 
     step1 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
     assert step1.status_code == 200
     assert step1.json()["step"]["status"] == "succeeded"
+    assert step1.json()["step"]["step_name"] == "nts_episode_breakdown"
 
     step2 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
     assert step2.status_code == 200

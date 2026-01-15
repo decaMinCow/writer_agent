@@ -70,3 +70,38 @@ async def test_export_script_fountain_smoke(client):
     assert "== 1. 第一场 ==" in text
     assert "INT. 房间 - 夜" in text
 
+
+async def test_export_script_text_smoke(client):
+    brief = await client.post("/api/briefs", json={"title": "测试剧本", "content": {}})
+    brief_id = brief.json()["id"]
+    snap = await client.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    s1 = await client.post(
+        "/api/artifacts",
+        json={"kind": "script_scene", "ordinal": 1, "title": "第一场"},
+    )
+    s2 = await client.post(
+        "/api/artifacts",
+        json={"kind": "script_scene", "ordinal": 2, "title": "第二场"},
+    )
+    assert s1.status_code == 200
+    assert s2.status_code == 200
+
+    v1 = await client.post(
+        f"/api/artifacts/{s1.json()['id']}/versions",
+        json={"source": "agent", "content_text": "第一场内容。", "metadata": {}, "brief_snapshot_id": snap_id},
+    )
+    v2 = await client.post(
+        f"/api/artifacts/{s2.json()['id']}/versions",
+        json={"source": "agent", "content_text": "第二场内容。", "metadata": {}, "brief_snapshot_id": snap_id},
+    )
+    assert v1.status_code == 200
+    assert v2.status_code == 200
+
+    exported = await client.get(f"/api/brief-snapshots/{snap_id}/export/script.txt")
+    assert exported.status_code == 200
+    text = exported.json()["text"]
+    assert "==" not in text
+    assert "第一场内容。" in text
+    assert "第二场内容。" in text

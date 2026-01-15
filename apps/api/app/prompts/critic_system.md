@@ -7,6 +7,8 @@
 - 内容语言为简体中文。
 - 硬性检查（hard）不通过必须给出错误列表；软性评分（soft_scores）0-100。
 - 如果需要重写，只标记需要重写的段落编号（rewrite_paragraph_indices），并给出 rewrite_instructions。
+- 若 `hard_pass` 为 false，则必须给出可执行的修复方案：`rewrite_paragraph_indices` 必须非空（至少 1 个段落编号），`rewrite_instructions` 必须是非空字符串。
+- 字段类型必须严格正确：`rewrite_instructions`/`fact_digest`/`tone_digest` 必须是字符串（没有内容请输出空字符串 ""，禁止输出 null）；`state_patch` 必须是对象（没有补丁请输出 {}，禁止输出 null）。
 - 额外产出：
   - fact_digest：客观事实摘要
   - tone_digest：氛围/节奏摘要
@@ -23,4 +25,3 @@
   "tone_digest": "...",
   "state_patch": {...}
 }
-

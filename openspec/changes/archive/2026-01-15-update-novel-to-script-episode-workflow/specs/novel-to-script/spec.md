@@ -1,8 +1,7 @@
-# novel-to-script Specification
+# novel-to-script — Delta (update-novel-to-script-episode-workflow)
 
-## Purpose
-TBD - created by archiving change add-novel-to-script-workflow. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Convert committed novel chapters into committed script scenes
 The system SHALL convert committed novel chapter artifacts into committed script scene artifacts using a stepwise workflow.
 
@@ -20,34 +19,14 @@ The system SHALL convert committed novel chapter artifacts into committed script
 #### Scenario: Episode output uses fixed numbering format for custom short-drama scripts
 - **GIVEN** `output_spec.script_format` is `custom`
 - **WHEN** the workflow drafts an episode
-- **THEN** the episode text SHALL include exactly one episode header (e.g. `第1集` or `第一集`) that matches the episode index
-- **AND** scene blocks inside the episode SHALL be numbered `X-Y` (default, e.g. `11-1`, `11-2`) or `X.Y` (accepted), monotonic and non-duplicated
+- **THEN** the episode text SHALL include exactly one `第X集` header
+- **AND** scene blocks inside the episode SHALL be numbered `X.Y` (e.g. `11.1`, `11.2`), monotonic and non-duplicated
 - **AND** the system SHALL block commit if the output violates these format constraints
 
 #### Scenario: Commit an episode with fidelity gating
 - **WHEN** an episode is drafted and evaluated
 - **THEN** the system SHALL block commit if hard fidelity or format constraints fail
 - **AND** the system SHALL attempt targeted fixes before failing the run
-
-### Requirement: Select source chapters from the same snapshot
-The system SHALL use committed novel chapters associated with the same `brief_snapshot_id` as the workflow run, unless an explicit source snapshot is provided for the run.
-
-#### Scenario: Default source uses the run snapshot
-- **GIVEN** a novel→script workflow run exists
-- **AND** no explicit source snapshot is configured for the run
-- **WHEN** the workflow selects novel chapter sources
-- **THEN** the system SHALL use committed novel chapters associated with the run's `brief_snapshot_id`
-
-#### Scenario: Source snapshot override uses the configured source snapshot
-- **GIVEN** a novel→script workflow run exists
-- **AND** the run is configured with a `source_brief_snapshot_id`
-- **WHEN** the workflow selects novel chapter sources
-- **THEN** the system SHALL use committed novel chapters associated with `source_brief_snapshot_id`
-
-#### Scenario: Missing novel sources fails with actionable error
-- **GIVEN** no novel chapter versions exist for the effective source snapshot
-- **WHEN** the user runs a novel→script workflow
-- **THEN** the system SHALL fail with an actionable error indicating novel sources are missing
 
 ### Requirement: Honor script format preference for novel→script
 The system MUST format generated scenes according to `brief_snapshot.content.output_spec.script_format`, unless an explicit `conversion_output_spec` is configured for the run.

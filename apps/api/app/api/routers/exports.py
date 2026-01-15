@@ -18,6 +18,7 @@ from app.services.export_compiler import (
     compile_novel_markdown,
     compile_novel_text,
     compile_script_fountain,
+    compile_script_text,
 )
 
 router = APIRouter(prefix="/api/brief-snapshots", tags=["exports"])
@@ -133,3 +134,15 @@ async def export_script_fountain(
         text=text,
     )
 
+
+@router.get("/{snapshot_id}/export/script.txt", response_model=ExportResponse)
+async def export_script_text(
+    snapshot_id: uuid.UUID,
+    apply_glossary: bool = True,
+    session: AsyncSession = Depends(get_db_session),
+) -> ExportResponse:
+    await _get_snapshot(session, snapshot_id)
+    text = await compile_script_text(
+        session=session, brief_snapshot_id=snapshot_id, apply_glossary=apply_glossary
+    )
+    return ExportResponse(filename="script.txt", content_type="text/plain; charset=utf-8", text=text)

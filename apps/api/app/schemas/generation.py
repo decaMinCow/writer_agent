@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class NovelOutlineChapter(BaseModel):
@@ -42,6 +42,82 @@ class CriticResult(BaseModel):
     tone_digest: str = Field(default="")
     state_patch: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("hard_errors", mode="before")
+    @classmethod
+    def _coerce_hard_errors(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return [cleaned] if cleaned else []
+        if isinstance(value, list):
+            items: list[str] = []
+            for item in value:
+                if item is None:
+                    continue
+                text = str(item).strip()
+                if text:
+                    items.append(text)
+            return items
+        return []
+
+    @field_validator("soft_scores", mode="before")
+    @classmethod
+    def _coerce_soft_scores(cls, value: Any) -> dict[str, int]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        cleaned: dict[str, int] = {}
+        for key, raw in value.items():
+            if key is None:
+                continue
+            try:
+                score = int(raw)
+            except (TypeError, ValueError):
+                continue
+            cleaned[str(key)] = score
+        return cleaned
+
+    @field_validator("rewrite_paragraph_indices", mode="before")
+    @classmethod
+    def _coerce_rewrite_paragraph_indices(cls, value: Any) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            indices: list[int] = []
+            for item in value:
+                try:
+                    idx = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if idx >= 1:
+                    indices.append(idx)
+            return indices
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            return []
+        return [idx] if idx >= 1 else []
+
+    @field_validator("rewrite_instructions", "fact_digest", "tone_digest", mode="before")
+    @classmethod
+    def _coerce_optional_str(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    @field_validator("state_patch", mode="before")
+    @classmethod
+    def _coerce_state_patch(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        return {}
+
 
 class RewriteResult(BaseModel):
     replacements: dict[int, str] = Field(default_factory=dict)
@@ -61,9 +137,18 @@ class ScriptSceneList(BaseModel):
     scenes: list[ScriptSceneListItem]
 
 
+class EpisodeBreakdown(BaseModel):
+    episode_index: int = Field(ge=1)
+    chapter_title: str = Field(default="")
+    key_events: list[str] = Field(default_factory=list, min_length=1)
+    conflicts: list[str] = Field(default_factory=list)
+    emotional_beats: list[str] = Field(default_factory=list)
+    relationship_changes: list[str] = Field(default_factory=list)
+    hook_idea: str = Field(default="")
+
+
 class CommittedArtifact(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     artifact_id: uuid.UUID
     artifact_version_id: uuid.UUID
-

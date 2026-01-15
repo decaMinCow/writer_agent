@@ -30,7 +30,7 @@ def determine_step_name(run: WorkflowRun) -> str:
     if run.kind == WorkflowKind.script:
         return "script_scene_list"
     if run.kind == WorkflowKind.novel_to_script:
-        return "nts_scene_list"
+        return "nts_episode_breakdown"
     return "start"
 
 

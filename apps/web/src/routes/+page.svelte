@@ -31,6 +31,7 @@
 		exportNovelMarkdown,
 		exportNovelText,
 		exportScriptFountain,
+		exportScriptText,
 		updateOpenThread,
 		patchBriefOutputSpecOverrides,
 		patchGlobalOutputSpecDefaults,
@@ -135,6 +136,7 @@
 	let selectedRun: WorkflowRunRead | null = null;
 	let workflowSteps: WorkflowStepRunRead[] = [];
 	let selectedStep: WorkflowStepRunRead | null = null;
+	let runCritic: Record<string, unknown> | null = null;
 	let workflowKindDraft: WorkflowRunRead['kind'] = 'novel';
 	let creatingRun = false;
 	let ntsSourceSnapshotIdDraft = '';
@@ -193,6 +195,7 @@
 	let applyGlossaryOnExport = true;
 	let exportingNovelMd = false;
 	let exportingNovelTxt = false;
+	let exportingScriptText = false;
 	let exportingScriptFountain = false;
 	let loadingAnalysis = false;
 	let rebuildingKg = false;
@@ -854,23 +857,39 @@
 		}
 	}
 
-	async function downloadScriptFountain() {
-		if (!selectedSnapshot) return;
-		error = null;
-		exportingScriptFountain = true;
-		try {
+		async function downloadScriptFountain() {
+			if (!selectedSnapshot) return;
+			error = null;
+			exportingScriptFountain = true;
+			try {
 			const resp = await exportScriptFountain(selectedSnapshot.id, {
 				apply_glossary: applyGlossaryOnExport,
 			});
 			downloadTextFile(resp.filename, resp.text, resp.content_type);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			exportingScriptFountain = false;
+			} finally {
+				exportingScriptFountain = false;
+			}
 		}
-	}
 
-		async function openArtifactVersionFromIssue(versionId: string) {
+		async function downloadScriptTxt() {
+			if (!selectedSnapshot) return;
+			error = null;
+			exportingScriptText = true;
+			try {
+				const resp = await exportScriptText(selectedSnapshot.id, {
+					apply_glossary: applyGlossaryOnExport,
+				});
+				downloadTextFile(resp.filename, resp.text, resp.content_type);
+			} catch (e) {
+				error = e instanceof Error ? e.message : String(e);
+			} finally {
+				exportingScriptText = false;
+			}
+		}
+
+			async function openArtifactVersionFromIssue(versionId: string) {
 			error = null;
 			try {
 				const v = await getArtifactVersion(versionId);
@@ -1501,7 +1520,9 @@
 		const phase = cursor.phase ? String(cursor.phase) : '';
 		const chapter = cursor.chapter_index ? `章${cursor.chapter_index}` : '';
 		const scene = cursor.scene_index ? `场${cursor.scene_index}` : '';
-		const parts = [phase, chapter || scene].filter(Boolean);
+		const unit =
+			run.kind === 'novel_to_script' && cursor.chapter_index ? `集${cursor.chapter_index}` : chapter || scene;
+		const parts = [phase, unit].filter(Boolean);
 		return parts.join(' · ');
 	}
 
@@ -1538,6 +1559,11 @@
 		}
 
 		if (run.kind === 'novel_to_script') {
+			if (phase === 'nts_episode_breakdown') return `${kindLabel} · 第${chapterIndex || 1}集 · 拆解`;
+			if (phase === 'nts_episode_draft') return `${kindLabel} · 第${chapterIndex || 1}集 · 草稿`;
+			if (phase === 'nts_episode_critic') return `${kindLabel} · 第${chapterIndex || 1}集 · 审校`;
+			if (phase === 'nts_episode_fix') return `${kindLabel} · 第${chapterIndex || 1}集 · 修复`;
+			if (phase === 'nts_episode_commit') return `${kindLabel} · 第${chapterIndex || 1}集 · 提交`;
 			if (phase === 'nts_scene_list') return `${kindLabel} · 场景列表`;
 			if (phase === 'nts_scene_draft') return `${kindLabel} · 第${sceneIndex || 1}场 · 草稿`;
 			if (phase === 'nts_scene_critic') return `${kindLabel} · 第${sceneIndex || 1}场 · 审校`;
@@ -1560,18 +1586,42 @@
 		return mapping[detail] ?? detail;
 	}
 
-	function runErrorSummary(err: Record<string, unknown> | null): string {
-		if (!err) return '';
-		const detail = typeof (err as any).detail === 'string' ? ((err as any).detail as string) : '';
-		const detailLabel = detail ? translateWorkflowErrorDetail(detail) : '';
-		const hardErrors = Array.isArray((err as any).hard_errors) ? ((err as any).hard_errors as unknown[]) : null;
-		const hardText = hardErrors && hardErrors.length ? hardErrors.map(String).join(', ') : '';
-		const errorType = typeof (err as any).error_type === 'string' ? ((err as any).error_type as string) : '';
-		const message = typeof (err as any).error === 'string' ? ((err as any).error as string) : '';
+		function runErrorSummary(err: Record<string, unknown> | null): string {
+			if (!err) return '';
+			const detail = typeof (err as any).detail === 'string' ? ((err as any).detail as string) : '';
+			const detailLabel = detail ? translateWorkflowErrorDetail(detail) : '';
+			const hardErrors = Array.isArray((err as any).hard_errors) ? ((err as any).hard_errors as unknown[]) : null;
+			const hardText = hardErrors && hardErrors.length ? hardErrors.map(String).join(', ') : '';
+			const errorType = typeof (err as any).error_type === 'string' ? ((err as any).error_type as string) : '';
+			const message = typeof (err as any).error === 'string' ? ((err as any).error as string) : '';
 
-		const parts = [detailLabel || detail, errorType ? `(${errorType})` : '', hardText || message].filter(Boolean);
-		return parts.join(' ');
-	}
+			const parts = [detailLabel || detail, errorType ? `(${errorType})` : '', hardText || message].filter(Boolean);
+			return parts.join(' ');
+		}
+
+			function translateCriticHardError(code: string): string {
+				const mapping: Record<string, string> = {
+					dead_character_appears: '已死亡角色再次出现',
+					inventory_impossible: '物品/道具逻辑不成立',
+					presence_conflict: '角色在场/位置冲突',
+					world_rule_violation: '违背世界观硬规则',
+					pov_drift: '视角漂移',
+					ooc_risk: '角色行为可能 OOC',
+					format_prompt_leak: '输出包含提示词/规则/流程文本',
+					format_missing_episode_header: '缺少集头（第X集/第一集）',
+					format_multiple_episode_headers: '集头重复（出现多次第X集）',
+					format_episode_header_mismatch: '集头集数与当前集不匹配',
+					format_missing_scene_blocks: '缺少场景块（X-Y 或 X.Y）',
+					format_scene_numbering_invalid: '场号格式不合法（应为 X-Y 或 X.Y）',
+					format_scene_block_episode_mismatch: '场号集数与当前集不匹配',
+					format_scene_blocks_duplicate: '场号重复',
+					format_scene_blocks_not_monotonic: '场号未递增',
+					format_multiple_scene_blocks: '单场输出包含多个场景块（如 1-1/1-2…）',
+					format_multiple_scene_headings: '单场输出包含多个 INT./EXT. 场景标题',
+					empty_draft: '草稿为空',
+				};
+				return mapping[code] ?? code;
+			}
 
 	$: {
 		const snapshotId = selectedSnapshot?.id;
@@ -1593,6 +1643,16 @@
 				.filter((step) => step.status === 'failed')
 				.slice()
 				.sort((a, b) => (b.step_index ?? 0) - (a.step_index ?? 0))[0] ?? null;
+	}
+
+	$: {
+		const state = selectedRun && typeof (selectedRun as any).state === 'object' ? ((selectedRun as any).state as any) : null;
+		const critic = state && criticInState(state) ? (state.critic as any) : null;
+		runCritic = critic && typeof critic === 'object' ? (critic as Record<string, unknown>) : null;
+	}
+
+	function criticInState(state: Record<string, unknown>): boolean {
+		return Object.prototype.hasOwnProperty.call(state, 'critic');
 	}
 
 	onMount(async () => {
@@ -2027,10 +2087,10 @@
 									{/if}
 								</div>
 
-								{#if selectedRun.status === 'failed'}
-									<div class="mb-3 rounded-md border border-red-900/60 bg-red-950/30 p-3">
-										<div class="mb-2 flex items-center justify-between gap-2">
-											<div class="text-xs font-semibold text-red-200">运行失败</div>
+									{#if selectedRun.status === 'failed'}
+										<div class="mb-3 rounded-md border border-red-900/60 bg-red-950/30 p-3">
+											<div class="mb-2 flex items-center justify-between gap-2">
+												<div class="text-xs font-semibold text-red-200">运行失败</div>
 											<div class="text-[11px] text-red-200/70">
 												{runErrorSummary(selectedRun.error)}
 											</div>
@@ -2061,13 +2121,78 @@
 											提示：可点选失败 step 查看 outputs / error；也可用「节点对话干预」修正
 											run.state 后点「重试」。
 										</div>
-									</div>
-								{/if}
+										</div>
+									{/if}
 
-								<div class="mb-3 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-									<div class="mb-2 flex items-center justify-between gap-2">
-										<div class="text-xs font-semibold text-zinc-300">Run State（可编辑）</div>
-										<div class="flex gap-2">
+										{#if runCritic}
+											<div class="mb-3 rounded-md border border-amber-900/50 bg-amber-950/20 p-3">
+												<div class="mb-2 flex items-center justify-between gap-2">
+													<div class="text-xs font-semibold text-amber-200">审校原因 / 修复建议</div>
+													<div class="text-[11px] text-amber-200/70">
+														{(runCritic as any).hard_pass === false ? 'hard_pass: false' : 'hard_pass: true'}
+													</div>
+												</div>
+												{#if selectedStep?.status === 'running'}
+													<div class="mb-2 text-[10px] text-amber-200/70">
+														注意：当前 step 正在运行中；以下可能是上一次审校结果。请查看「Step 输出 · 实时输出（流式）」。
+													</div>
+												{/if}
+	
+												{#if Array.isArray((runCritic as any).hard_errors) &&
+												((runCritic as any).hard_errors as unknown[]).length > 0}
+													<div class="mb-2 text-[11px] text-amber-100/90">
+													<div class="mb-1 font-semibold text-amber-200/80">Hard Errors</div>
+													<div class="space-y-1">
+														{#each (runCritic as any).hard_errors as e (String(e))}
+															<div class="rounded border border-amber-900/40 bg-amber-950/10 px-2 py-1">
+																{translateCriticHardError(String(e))}
+																<span class="ml-1 text-[10px] text-amber-200/60">({String(e)})</span>
+															</div>
+														{/each}
+													</div>
+												</div>
+											{/if}
+
+											{#if typeof (runCritic as any).rewrite_instructions === 'string' &&
+											((runCritic as any).rewrite_instructions as string).trim().length > 0}
+												<div class="mb-2 text-[11px]">
+													<div class="mb-1 font-semibold text-amber-200/80">Rewrite Instructions</div>
+													<div class="whitespace-pre-wrap rounded border border-amber-900/40 bg-amber-950/10 p-2 text-amber-100/90">
+														{(runCritic as any).rewrite_instructions}
+													</div>
+												</div>
+											{/if}
+
+											{#if Array.isArray((runCritic as any).rewrite_paragraph_indices) &&
+											((runCritic as any).rewrite_paragraph_indices as unknown[]).length > 0}
+												<div class="mb-2 text-[11px] text-amber-100/90">
+													<span class="font-semibold text-amber-200/80">建议重写段落：</span>
+													{((runCritic as any).rewrite_paragraph_indices as unknown[]).map(String).join(', ')}
+												</div>
+											{/if}
+
+											{#if (runCritic as any).soft_scores && typeof (runCritic as any).soft_scores === 'object'}
+												{@const entries = Object.entries((runCritic as any).soft_scores as Record<string, unknown>).filter(
+													([, v]) => typeof v === 'number',
+												)}
+												{#if entries.length > 0}
+													<div class="text-[11px] text-amber-100/90">
+														<span class="font-semibold text-amber-200/80">Soft Scores：</span>
+														{entries.map(([k, v]) => `${k}:${v}`).join(' · ')}
+													</div>
+												{/if}
+											{/if}
+
+											<div class="mt-2 text-[10px] text-amber-200/70">
+												提示：审校结果来自 run.state.critic；可在失败 step/审校 step 中对照 outputs。
+											</div>
+										</div>
+									{/if}
+
+									<div class="mb-3 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+										<div class="mb-2 flex items-center justify-between gap-2">
+											<div class="text-xs font-semibold text-zinc-300">Run State（可编辑）</div>
+											<div class="flex gap-2">
 											<button
 												class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
 												onclick={resetRunStateDraft}
@@ -3037,11 +3162,11 @@
 									</label>
 								</div>
 
-								<div class="mb-4 grid grid-cols-3 gap-2">
-									<button
-										class="rounded-md bg-emerald-700 px-2 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
-										onclick={downloadNovelMd}
-										disabled={exportingNovelMd}
+									<div class="mb-4 grid grid-cols-4 gap-2">
+										<button
+											class="rounded-md bg-emerald-700 px-2 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+											onclick={downloadNovelMd}
+											disabled={exportingNovelMd}
 									>
 										{exportingNovelMd ? '导出中…' : '小说 .md'}
 									</button>
@@ -3052,12 +3177,19 @@
 									>
 										{exportingNovelTxt ? '导出中…' : '小说 .txt'}
 									</button>
-									<button
-										class="rounded-md bg-emerald-700 px-2 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
-										onclick={downloadScriptFountain}
-										disabled={exportingScriptFountain}
-									>
-										{exportingScriptFountain ? '导出中…' : '剧本 Fountain'}
+										<button
+											class="rounded-md bg-emerald-700 px-2 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+											onclick={downloadScriptTxt}
+											disabled={exportingScriptText}
+										>
+											{exportingScriptText ? '导出中…' : '剧本 .txt'}
+										</button>
+										<button
+											class="rounded-md bg-emerald-700 px-2 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+											onclick={downloadScriptFountain}
+											disabled={exportingScriptFountain}
+										>
+											{exportingScriptFountain ? '导出中…' : '剧本 Fountain'}
 									</button>
 								</div>
 

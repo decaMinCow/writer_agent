@@ -892,3 +892,15 @@ export async function exportScriptFountain(
 		)}`,
 	);
 }
+
+export async function exportScriptText(
+	snapshotId: string,
+	payload?: { apply_glossary?: boolean },
+): Promise<ExportResponse> {
+	const apply_glossary = payload?.apply_glossary ?? true;
+	return await fetchJson<ExportResponse>(
+		`/api/brief-snapshots/${snapshotId}/export/script.txt?apply_glossary=${encodeURIComponent(
+			String(apply_glossary),
+		)}`,
+	);
+}

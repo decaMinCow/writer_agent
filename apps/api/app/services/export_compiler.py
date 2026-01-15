@@ -127,3 +127,23 @@ async def compile_script_fountain(
             body = _apply_glossary(body, replacements)
         parts.append(f"{_to_fountain_scene_heading(artifact=artifact)}\n\n{body}".strip())
     return "\n\n".join(parts).strip() + ("\n" if parts else "")
+
+
+async def compile_script_text(
+    *,
+    session: AsyncSession,
+    brief_snapshot_id: uuid.UUID,
+    apply_glossary: bool,
+) -> str:
+    scenes = await _latest_versions_by_kind(
+        session=session, brief_snapshot_id=brief_snapshot_id, kind=ArtifactKind.script_scene
+    )
+    replacements = await _load_glossary(session=session, brief_snapshot_id=brief_snapshot_id)
+    parts: list[str] = []
+    for _artifact, version in scenes:
+        body = (version.content_text or "").strip()
+        if apply_glossary:
+            body = _apply_glossary(body, replacements)
+        if body:
+            parts.append(body)
+    return "\n\n".join(parts).strip() + ("\n" if parts else "")
