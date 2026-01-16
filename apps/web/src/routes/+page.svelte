@@ -3135,12 +3135,28 @@
 						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 flex items-center justify-between gap-2">
 								<div class="text-xs font-semibold text-zinc-300">Brief 内容（结构化）</div>
-								<button
-									class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
-									onclick={() => (showBriefJson = !showBriefJson)}
-								>
-									{showBriefJson ? '收起' : '展开'}
-								</button>
+								<div class="flex items-center gap-2">
+									<button
+										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
+										onclick={() =>
+											copyToClipboard(
+												JSON.stringify(
+													{ title: selectedBrief?.title ?? null, content: selectedBrief?.content ?? {} },
+													null,
+													2,
+												),
+											)}
+										disabled={!selectedBrief}
+									>
+										复制
+									</button>
+									<button
+										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+										onclick={() => (showBriefJson = !showBriefJson)}
+									>
+										{showBriefJson ? '收起' : '展开'}
+									</button>
+								</div>
 							</div>
 							<div class="text-[10px] text-zinc-500">
 								提示：对话补全出来的“简介/背景/人物”等都会写进 `brief.content`。
