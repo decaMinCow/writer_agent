@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 import re
 import time
+import unicodedata
 import uuid
 from datetime import datetime
 from typing import Any
@@ -29,6 +31,7 @@ from app.schemas.generation import (
     CriticResult,
     DraftResult,
     EpisodeBreakdown,
+    NtsChapterPlan,
     NovelBeats,
     NovelOutline,
     RewriteResult,
@@ -38,8 +41,8 @@ from app.services.error_utils import format_exception_chain
 from app.services.json_utils import deep_merge
 from app.services.memory_store import index_artifact_version, retrieve_evidence
 from app.services.prompting import extract_json_object, load_prompt, render_prompt
-from app.services.settings_store import get_prompt_presets
-from app.services.text_utils import apply_replacements, join_paragraphs, numbered_paragraphs
+from app.services.settings_store import get_prompt_presets, resolve_runtime_execution_preferences
+from app.services.text_utils import apply_replacements, join_paragraphs, numbered_paragraphs, split_paragraphs
 from app.services.workflow_events import WorkflowEventHub
 
 
@@ -181,6 +184,196 @@ _NTS_PROMPT_LEAK_MARKERS = (
     "你是小说→剧本",
     "转写规范",
 )
+
+_NTS_DEFAULT_TARGET_CHARS_MIN = 500
+_NTS_DEFAULT_TARGET_CHARS_MAX = 800
+_NTS_SOFT_MAX_MIN_MULTIPLIER_DEFAULT = 3
+_NTS_TARGET_CHAR_RANGE_RE = re.compile(
+    r"(?P<min>\d{2,5})\s*(?:-|–|—|~|～|〜|到|至)\s*(?P<max>\d{2,5})\s*(?:字|字符)",
+)
+
+
+def _nts_parse_target_char_range(notes: str) -> tuple[int, int] | None:
+    text = (notes or "").strip()
+    if not text:
+        return None
+    match = _NTS_TARGET_CHAR_RANGE_RE.search(text)
+    if not match:
+        return None
+    try:
+        min_chars = int(match.group("min"))
+        max_chars = int(match.group("max"))
+    except (TypeError, ValueError):
+        return None
+    if min_chars <= 0 or max_chars <= 0:
+        return None
+    if min_chars > max_chars:
+        min_chars, max_chars = max_chars, min_chars
+    if min_chars < 50 or max_chars > 50_000:
+        return None
+    return min_chars, max_chars
+
+
+def _nts_content_char_count(text: str) -> int:
+    count = 0
+    for ch in text or "":
+        if ch.isspace():
+            continue
+        if unicodedata.category(ch).startswith("P"):
+            continue
+        count += 1
+    return count
+
+
+def _nts_normalize_for_similarity(text: str) -> str:
+    normalized: list[str] = []
+    for ch in text or "":
+        if ch.isspace():
+            continue
+        if ch.isdigit():
+            continue
+        if unicodedata.category(ch).startswith("P"):
+            continue
+        normalized.append(ch)
+    return "".join(normalized)
+
+
+def _nts_find_split_boundary(text: str, approx_index: int) -> int:
+    cleaned = text or ""
+    if approx_index <= 0:
+        return 0
+    if approx_index >= len(cleaned):
+        return len(cleaned)
+
+    window = 220
+    start = max(0, approx_index - window)
+    end = min(len(cleaned), approx_index + window)
+
+    for sep in ["\n\n", "\n", "。", "！", "？", "，", ",", "；", ";"]:
+        left = cleaned.rfind(sep, start, approx_index)
+        right = cleaned.find(sep, approx_index, end)
+        candidates: list[int] = []
+        if left != -1:
+            candidates.append(left + len(sep))
+        if right != -1:
+            candidates.append(right + len(sep))
+        if candidates:
+            return min(candidates, key=lambda idx: abs(idx - approx_index))
+
+    return approx_index
+
+
+def _nts_split_chapter_text_into_segments(chapter_text: str, segments: int) -> list[str]:
+    cleaned = (chapter_text or "").strip()
+    if not cleaned:
+        return [""]
+
+    try:
+        parts = int(segments)
+    except (TypeError, ValueError):
+        parts = 1
+    if parts <= 1:
+        return [cleaned]
+
+    paragraphs = split_paragraphs(cleaned)
+    if len(paragraphs) >= parts and paragraphs:
+        counts = [_nts_content_char_count(p) for p in paragraphs]
+        total_chars = sum(counts)
+        remaining_chars = total_chars
+        remaining_parts = parts
+        target = remaining_chars / remaining_parts if remaining_parts else remaining_chars
+
+        groups: list[str] = []
+        current: list[str] = []
+        current_chars = 0
+
+        for idx, (paragraph, chars) in enumerate(zip(paragraphs, counts)):
+            current.append(paragraph)
+            current_chars += int(chars)
+            remaining_paragraphs = len(paragraphs) - (idx + 1)
+
+            if remaining_parts > 1 and remaining_paragraphs >= (remaining_parts - 1) and current_chars >= target:
+                groups.append(join_paragraphs(current))
+                remaining_chars -= current_chars
+                remaining_parts -= 1
+                current = []
+                current_chars = 0
+                target = remaining_chars / remaining_parts if remaining_parts else remaining_chars
+
+        if current:
+            groups.append(join_paragraphs(current))
+
+        if len(groups) == parts:
+            return groups
+
+    # Fallback: slice by approximate character position, choosing a nearby boundary.
+    segments_list: list[str] = []
+    start_index = 0
+    total_len = len(cleaned)
+    for part in range(1, parts):
+        approx = int(total_len * part / parts)
+        cut = _nts_find_split_boundary(cleaned, approx)
+        if cut <= start_index:
+            cut = min(total_len, start_index + max(1, int((total_len - start_index) / (parts - part + 1))))
+        segments_list.append(cleaned[start_index:cut].strip())
+        start_index = cut
+    segments_list.append(cleaned[start_index:].strip())
+
+    return segments_list
+
+
+def _nts_similarity_ratio(a: str, b: str) -> float:
+    a_norm = _nts_normalize_for_similarity(a)
+    b_norm = _nts_normalize_for_similarity(b)
+    if not a_norm or not b_norm:
+        return 0.0
+    a_norm = a_norm[:8000]
+    b_norm = b_norm[:8000]
+    return difflib.SequenceMatcher(a=a_norm, b=b_norm).ratio()
+
+
+def _nts_resolve_target_chars(
+    *, state: dict[str, Any], output_spec: dict[str, Any]
+) -> tuple[int, int, int]:
+    existing = state.get("nts_target_chars")
+    if isinstance(existing, dict):
+        policy = str(existing.get("soft_max_policy") or "")
+        try:
+            multiplier = int(existing.get("overflow_multiplier"))
+        except (TypeError, ValueError):
+            multiplier = 0
+        try:
+            min_chars = int(existing.get("min"))
+            max_chars = int(existing.get("max"))
+            soft_max = int(existing.get("soft_max"))
+        except (TypeError, ValueError):
+            min_chars = 0
+            max_chars = 0
+            soft_max = 0
+        if min_chars > 0 and max_chars > 0 and soft_max > 0 and policy == "min_times" and multiplier > 0:
+            return min_chars, max_chars, soft_max
+
+    notes = str(output_spec.get("script_format_notes") or "")
+    parsed = _nts_parse_target_char_range(notes)
+    if parsed is None:
+        min_chars, max_chars = _NTS_DEFAULT_TARGET_CHARS_MIN, _NTS_DEFAULT_TARGET_CHARS_MAX
+        source = "default"
+    else:
+        min_chars, max_chars = parsed
+        source = "notes"
+
+    overflow_multiplier = _NTS_SOFT_MAX_MIN_MULTIPLIER_DEFAULT
+    soft_max = max(int(max_chars), int(min_chars) * overflow_multiplier)
+
+    state["nts_target_chars"] = {
+        "min": min_chars,
+        "max": max_chars,
+        "soft_max": soft_max,
+        "soft_max_policy": "min_times",
+        "overflow_multiplier": overflow_multiplier,
+        "source": source,
+    }
+    return min_chars, max_chars, soft_max
 
 _NTS_EP_SCENE_SLUG_RE = re.compile(r"(?i)\bep(?P<ep>\d+)[_\-]s(?P<scene>\d+)\b")
 _NTS_CUSTOM_SCENE_HEADER_RE = re.compile(r"(?m)^(?P<ep>\d+)\s*[-.]\s*(?P<scene>\d+)(?:\s+.*)?$")
@@ -335,6 +528,9 @@ def _nts_episode_format_issues(*, text: str, script_format: str, episode_index: 
         ep = _parse_episode_index(str(headers[0].group("ep") or "")) or -1
         if ep != int(episode_index):
             issues.append("format_episode_header_mismatch")
+        title = str(headers[0].group("title") or "").strip()
+        if title:
+            issues.append("format_episode_header_has_title")
 
     scene_headers = list(_NTS_DOT_SCENE_HEADER_RE.finditer(text))
     if not scene_headers:
@@ -406,29 +602,36 @@ async def _llm_complete_with_optional_stream(
     raw_output = ""
     buffer = ""
     last_flush = time.monotonic()
+    try:
+        async for delta in llm.stream_complete(system_prompt=system_prompt, user_prompt=user_prompt):
+            raw_output += delta
+            buffer += delta
+            now = time.monotonic()
+            if len(buffer) >= flush_chars or (now - last_flush) >= flush_interval_s:
+                await hub.publish(
+                    run_id=run_id,
+                    name="llm_delta",
+                    payload={"step_id": str(step_id), "append": buffer},
+                )
+                buffer = ""
+                last_flush = now
 
-    async for delta in llm.stream_complete(system_prompt=system_prompt, user_prompt=user_prompt):
-        raw_output += delta
-        buffer += delta
-        now = time.monotonic()
-        if len(buffer) >= flush_chars or (now - last_flush) >= flush_interval_s:
+        if buffer:
             await hub.publish(
                 run_id=run_id,
                 name="llm_delta",
                 payload={"step_id": str(step_id), "append": buffer},
             )
+        return raw_output
+    except Exception:
+        # Providers that are "OpenAI-compatible" sometimes have flaky stream implementations.
+        # Falling back to a non-streaming request makes autorun far more robust.
+        try:
+            return await llm.complete(system_prompt=system_prompt, user_prompt=user_prompt)
+        finally:
             buffer = ""
-            last_flush = now
-
-    if buffer:
-        await hub.publish(
-            run_id=run_id,
-            name="llm_delta",
-            payload={"step_id": str(step_id), "append": buffer},
-        )
-
-    await hub.publish(run_id=run_id, name="llm_end", payload={"step_id": str(step_id)})
-    return raw_output
+    finally:
+        await hub.publish(run_id=run_id, name="llm_end", payload={"step_id": str(step_id)})
 
 
 async def _select_latest_novel_chapter_versions(
@@ -523,7 +726,8 @@ async def execute_next_step(
     snapshot = await _get_snapshot(session, run.brief_snapshot_id)
     brief_json = snapshot.content
     current_state: dict[str, Any] = dict(state.get("current_state") or {})
-    max_fix_attempts = _resolve_max_fix_attempts(brief_json)
+    runtime_prefs = await resolve_runtime_execution_preferences(session=session, brief_id=snapshot.brief_id)
+    max_fix_attempts = int(runtime_prefs.get("max_fix_attempts") or 0)
 
     if run.kind == WorkflowKind.novel:
         phase = cursor.get("phase") or "novel_outline"
@@ -1082,9 +1286,13 @@ async def execute_next_step(
     if run.kind == WorkflowKind.novel_to_script:
         # Default to episode-based conversion (1 chapter = 1 episode). Keep `nts_scene_*` phases
         # for backward-compatible runs that were started with the older scene workflow.
-        phase = cursor.get("phase") or "nts_episode_breakdown"
+        split_mode = str(state.get("split_mode") or "").strip() or "chapter_unit"
+        default_phase = "nts_chapter_plan" if split_mode == "auto_by_length" else "nts_episode_breakdown"
+        phase = cursor.get("phase") or default_phase
         scene_index = int(cursor.get("scene_index") or 1)
         chapter_index = int(cursor.get("chapter_index") or 0)
+        episode_index = int(cursor.get("episode_index") or 0)
+        chapter_episode_sub_index = int(cursor.get("chapter_episode_sub_index") or 0)
         if not cursor.get("phase"):
             cursor["phase"] = phase
 
@@ -1132,10 +1340,662 @@ async def execute_next_step(
             output_spec.pop("script_format_notes", None)
         else:
             output_spec["script_format_notes"] = preset_notes
+
+        # For novel→script, default to the short-drama custom “集/场” format to keep
+        # format checks consistent with the prompt presets.
+        output_spec["script_format"] = "custom"
         brief_json_for_conversion = dict(brief_json) if isinstance(brief_json, dict) else {}
         brief_json_for_conversion["output_spec"] = output_spec
 
-        if phase.startswith("nts_episode_"):
+        if split_mode == "auto_by_length" and (phase == "nts_chapter_plan" or phase.startswith("nts_episode_")):
+            sources = await _select_latest_novel_chapter_versions(
+                session=session,
+                brief_snapshot_id=source_snapshot.id,
+            )
+            if not sources:
+                run.status = RunStatus.failed
+                run.error = {"detail": "novel_source_missing"}
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "novel_source_missing"}
+
+            digests: list[dict[str, Any]] = []
+            source_version_ids: list[str] = []
+            sources_by_ordinal: dict[int, tuple[Artifact, ArtifactVersion]] = {}
+            for ordinal, artifact, version in sources:
+                sources_by_ordinal[int(ordinal)] = (artifact, version)
+                meta = dict(version.meta or {})
+                fact_digest = str(meta.get("fact_digest") or "").strip()
+                tone_digest = str(meta.get("tone_digest") or "").strip()
+                chapter_title = str(
+                    meta.get("chapter_title") or meta.get("title") or artifact.title or f"第{ordinal}章"
+                )
+                if not fact_digest:
+                    fact_digest = (version.content_text or "").strip()[:200]
+                digests.append(
+                    {
+                        "chapter_index": ordinal,
+                        "chapter_title": chapter_title,
+                        "fact_digest": fact_digest,
+                        "tone_digest": tone_digest,
+                    }
+                )
+                source_version_ids.append(str(version.id))
+
+            state["novel_source"] = {
+                "source_snapshot_id": str(source_snapshot.id),
+                "artifact_version_ids": source_version_ids,
+                "chapter_digests": digests,
+            }
+
+            ordinals = sorted(sources_by_ordinal.keys())
+            if chapter_index <= 0:
+                chapter_index = ordinals[0]
+                cursor["chapter_index"] = chapter_index
+            if chapter_index not in sources_by_ordinal:
+                run.status = RunStatus.failed
+                run.error = {"detail": "chapter_not_found", "chapter_index": chapter_index}
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "chapter_not_found"}
+
+            chapter_artifact, chapter_version = sources_by_ordinal[int(chapter_index)]
+            chapter_meta = dict(chapter_version.meta or {})
+            chapter_title = str(
+                chapter_meta.get("chapter_title")
+                or chapter_meta.get("title")
+                or chapter_artifact.title
+                or f"第{chapter_index}章"
+            )
+            chapter_text = (chapter_version.content_text or "").strip()
+            if len(chapter_text) > 20000:
+                chapter_text = chapter_text[:20000].rstrip() + "\n\n（后续内容已截断）"
+
+            prev_digests = (
+                list(state.get("script_episode_digests") or [])
+                if isinstance(state.get("script_episode_digests"), list)
+                else []
+            )
+            prev_lines: list[str] = []
+            for item in prev_digests[-3:]:
+                idx = item.get("episode_index") or item.get("chapter_index") or item.get("index")
+                title = item.get("episode_title") or item.get("chapter_title") or item.get("title") or ""
+                fact = item.get("fact_digest") or ""
+                if idx:
+                    prefix = f"第{idx}集"
+                    if title:
+                        prefix += f"《{title}》"
+                    prev_lines.append(f"{prefix}：{fact}".strip())
+            prev_episode_digests_text = "\n".join([line for line in prev_lines if line]) or "(none)"
+
+            target_min, target_max, target_soft_max = _nts_resolve_target_chars(
+                state=state, output_spec=output_spec
+            )
+
+            raw_next = state.get("script_episode_index_next")
+            try:
+                script_episode_index_next = int(raw_next)
+            except (TypeError, ValueError):
+                script_episode_index_next = 1
+            if script_episode_index_next < 1:
+                script_episode_index_next = 1
+            state["script_episode_index_next"] = script_episode_index_next
+
+            if phase == "nts_chapter_plan":
+                chapter_json = {
+                    "chapter_index": int(chapter_index),
+                    "chapter_title": chapter_title,
+                    "chapter_char_count": _nts_content_char_count(chapter_text),
+                    "target_chars_min": target_min,
+                    "target_chars_max": target_max,
+                }
+                raw = await _llm_complete_with_optional_stream(
+                    llm=llm,
+                    system_prompt=load_prompt("nts_chapter_plan_system.md"),
+                    user_prompt=render_prompt(
+                        load_prompt("nts_chapter_plan_user.md"),
+                        {
+                            "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
+                            "CURRENT_STATE_JSON": json.dumps(current_state, ensure_ascii=False, indent=2),
+                            "CHAPTER_JSON": json.dumps(chapter_json, ensure_ascii=False, indent=2),
+                            "TARGET_CHARS_MIN": str(target_min),
+                            "TARGET_CHARS_MAX": str(target_max),
+                            "PREV_EPISODE_DIGESTS_TEXT": prev_episode_digests_text,
+                            "CHAPTER_TEXT": chapter_text or "(empty)",
+                        },
+                    ),
+                    hub=hub,
+                    run_id=run.id,
+                    step_id=step_id,
+                    step_name="nts_chapter_plan",
+                )
+                payload = extract_json_object(raw)
+                plan = NtsChapterPlan.model_validate(payload)
+                dumped = plan.model_dump(mode="json")
+                dumped["chapter_index"] = int(chapter_index)
+                if not dumped.get("chapter_title"):
+                    dumped["chapter_title"] = chapter_title
+                state["chapter_plan"] = dumped
+
+                cursor["phase"] = "nts_episode_draft"
+                cursor["chapter_index"] = int(chapter_index)
+                cursor["chapter_episode_sub_index"] = 1
+                cursor["episode_index"] = int(script_episode_index_next)
+                state["fix_attempt"] = 0
+                run.state = state
+                await session.commit()
+                return {
+                    "phase": phase,
+                    "chapter_index": int(chapter_index),
+                    "chapter_title": chapter_title,
+                    "chapter_plan": state["chapter_plan"],
+                }
+
+            plan_json = state.get("chapter_plan") or {}
+            try:
+                plan = NtsChapterPlan.model_validate(plan_json)
+            except ValidationError:
+                cursor["phase"] = "nts_chapter_plan"
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "chapter_plan_missing"}
+
+            if int(plan.chapter_index) != int(chapter_index):
+                cursor["phase"] = "nts_chapter_plan"
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "chapter_plan_mismatch"}
+
+            if chapter_episode_sub_index <= 0:
+                chapter_episode_sub_index = 1
+                cursor["chapter_episode_sub_index"] = 1
+            if episode_index <= 0:
+                episode_index = int(script_episode_index_next)
+                cursor["episode_index"] = episode_index
+
+            chapter_segments = _nts_split_chapter_text_into_segments(chapter_text, len(plan.episodes))
+            seg_pos = max(0, min(len(chapter_segments) - 1, int(chapter_episode_sub_index) - 1))
+            chapter_text_segment = (chapter_segments[seg_pos] or "").strip()
+            if not chapter_text_segment:
+                chapter_text_segment = chapter_text
+
+            sub_plan = next(
+                (ep for ep in plan.episodes if int(ep.sub_index) == int(chapter_episode_sub_index)), None
+            )
+            if sub_plan is None:
+                run.status = RunStatus.failed
+                run.error = {
+                    "detail": "chapter_episode_out_of_range",
+                    "chapter_index": int(chapter_index),
+                    "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                }
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "detail": "chapter_episode_out_of_range"}
+
+            episode_json = {
+                "episode_index": int(episode_index),
+                "chapter_title": chapter_title,
+                "source_chapter_index": int(chapter_index),
+                "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                "chapter_episode_total": len(plan.episodes),
+                "output_spec": output_spec,
+            }
+            breakdown_json = {
+                "episode_index": int(episode_index),
+                "chapter_title": chapter_title,
+                "key_events": sub_plan.key_events,
+                "conflicts": sub_plan.conflicts,
+                "emotional_beats": sub_plan.emotional_beats,
+                "relationship_changes": sub_plan.relationship_changes,
+                "hook_idea": sub_plan.hook_idea,
+                "title": sub_plan.title,
+                "sub_index": int(chapter_episode_sub_index),
+            }
+            already_covered_key_events: list[str] = []
+            if int(chapter_episode_sub_index) > 1:
+                for ep in plan.episodes:
+                    if int(ep.sub_index) >= int(chapter_episode_sub_index):
+                        break
+                    already_covered_key_events.extend([str(item) for item in ep.key_events if str(item).strip()])
+            if already_covered_key_events:
+                breakdown_json["already_covered_key_events"] = already_covered_key_events
+            state["episode_breakdown"] = breakdown_json
+
+            evidence_text = (
+                f"【前情摘要】\n{prev_episode_digests_text}\n\n---\n\n【本章标题】{chapter_title}\n\n【本集对应小说原文片段】\n{chapter_text_segment}"
+            ).strip()
+
+            if phase == "nts_episode_draft":
+                raw = await _llm_complete_with_optional_stream(
+                    llm=llm,
+                    system_prompt=load_prompt("nts_episode_draft_system.md"),
+                    user_prompt=render_prompt(
+                        load_prompt("nts_episode_draft_user.md"),
+                        {
+                            "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
+                            "CURRENT_STATE_JSON": json.dumps(current_state, ensure_ascii=False, indent=2),
+                            "EPISODE_JSON": json.dumps(episode_json, ensure_ascii=False, indent=2),
+                            "EPISODE_BREAKDOWN_JSON": json.dumps(
+                                breakdown_json, ensure_ascii=False, indent=2
+                            ),
+                            "PREV_EPISODE_DIGESTS_TEXT": prev_episode_digests_text,
+                            "CHAPTER_TEXT": chapter_text_segment or "(empty)",
+                        },
+                    ),
+                    hub=hub,
+                    run_id=run.id,
+                    step_id=step_id,
+                    step_name="nts_episode_draft",
+                )
+                payload = extract_json_object(raw)
+                draft = DraftResult.model_validate(payload)
+                state["draft"] = {
+                    "kind": "episode",
+                    "index": int(episode_index),
+                    "source_chapter_index": int(chapter_index),
+                    "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                    "title": draft.title,
+                    "text": draft.text,
+                }
+                cursor["phase"] = "nts_episode_critic"
+                run.state = state
+                await session.commit()
+                return {
+                    "phase": phase,
+                    "episode_index": int(episode_index),
+                    "chapter_index": int(chapter_index),
+                    "draft_preview": draft.text[:500],
+                }
+
+            if phase == "nts_episode_critic":
+                draft_state = state.get("draft") or {}
+                draft_text = str(draft_state.get("text") or "")
+                paragraphs, numbered = numbered_paragraphs(draft_text)
+
+                script_format = str(output_spec.get("script_format") or "custom")
+                format_issues = _nts_episode_format_issues(
+                    text=draft_text, script_format=script_format, episode_index=int(episode_index)
+                )
+
+                content_chars = _nts_content_char_count(draft_text)
+                length_issues: list[str] = []
+                length_soft_score: int | None = None
+                if content_chars < target_min:
+                    length_issues.append("length_too_short")
+                    length_soft_score = 0
+                elif content_chars > target_soft_max:
+                    length_issues.append("length_too_long")
+                    length_soft_score = 0
+                elif content_chars > target_max:
+                    length_soft_score = 80
+                else:
+                    length_soft_score = 100
+
+                duplicate_issues: list[str] = []
+                duplicate_of: int | None = None
+                duplicate_ratio: float | None = None
+                if int(chapter_episode_sub_index) > 1:
+                    prior_episode_indices: list[int] = []
+                    for item in state.get("chapter_episode_map") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            source_ch = int(item.get("source_chapter_index") or 0)
+                            sub_idx = int(item.get("chapter_episode_sub_index") or 0)
+                            prior_ep = int(item.get("episode_index") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if source_ch != int(chapter_index):
+                            continue
+                        if sub_idx >= int(chapter_episode_sub_index):
+                            continue
+                        if prior_ep > 0:
+                            prior_episode_indices.append(prior_ep)
+
+                    prior_episode_indices = sorted(set(prior_episode_indices))
+                    if prior_episode_indices:
+                        stmt = (
+                            select(Artifact.ordinal, ArtifactVersion.content_text, ArtifactVersion.created_at)
+                            .select_from(ArtifactVersion)
+                            .join(Artifact, ArtifactVersion.artifact_id == Artifact.id)
+                            .where(
+                                Artifact.kind == ArtifactKind.script_scene,
+                                Artifact.ordinal.in_(prior_episode_indices),
+                                ArtifactVersion.workflow_run_id == run.id,
+                                ArtifactVersion.brief_snapshot_id == snapshot.id,
+                            )
+                            .order_by(Artifact.ordinal.asc(), ArtifactVersion.created_at.desc())
+                        )
+                        rows = (await session.execute(stmt)).all()
+                        latest_text_by_ordinal: dict[int, str] = {}
+                        for ordinal, content_text, _created_at in rows:
+                            if ordinal is None:
+                                continue
+                            key = int(ordinal)
+                            if key in latest_text_by_ordinal:
+                                continue
+                            latest_text_by_ordinal[key] = str(content_text or "")
+
+                        best_ratio = 0.0
+                        best_episode: int | None = None
+                        for prior_ep, prior_text in latest_text_by_ordinal.items():
+                            ratio = _nts_similarity_ratio(draft_text, prior_text)
+                            if ratio > best_ratio:
+                                best_ratio = ratio
+                                best_episode = int(prior_ep)
+                        if best_episode is not None and best_ratio >= 0.85:
+                            duplicate_issues.append("content_duplicate_previous_episode")
+                            duplicate_of = best_episode
+                            duplicate_ratio = best_ratio
+
+                hard_issues = [*format_issues, *length_issues, *duplicate_issues]
+                if hard_issues:
+                    rewrite_indices = list(range(1, len(paragraphs) + 1)) if paragraphs else []
+                    length_hint = (
+                        f"当前字符数={content_chars}（去空格+去标点），目标={target_min}-{target_max}，允许上限≈{target_soft_max}。"
+                    )
+                    rewrite_instructions = (
+                        "格式修复：只输出这一集的剧本文本，不要包含任何提示词/规则/执行流程/STEP1/STEP2。"
+                        f"本集为第{episode_index}集，要求集头仅一次“第{episode_index}集”（不要附带集名/标题），场号使用“{episode_index}-1 / {episode_index}-2 …”（或“{episode_index}.1 / {episode_index}.2 …”）。"
+                        "删除重复的集头/错误的场号/重复的场景块，并确保场号递增不重复。"
+                    )
+                    if "length_too_short" in length_issues:
+                        rewrite_instructions += f"\n字数修复：内容过短，{length_hint} 请扩写到目标区间。"
+                    if "length_too_long" in length_issues:
+                        rewrite_instructions += f"\n字数修复：内容过长，{length_hint} 请压缩到目标区间。"
+                    if "content_duplicate_previous_episode" in duplicate_issues:
+                        prior_hint = ""
+                        if duplicate_of is not None and duplicate_ratio is not None:
+                            prior_hint = f"（与已提交的第{duplicate_of}集相似度≈{duplicate_ratio:.2f}）"
+                        rewrite_instructions += (
+                            f"\n去重修复：本集内容与已提交剧本集重复度过高{prior_hint}。"
+                            "必须只覆盖本集对应的小说片段与 STEP1 key_events；避免重复 already_covered_key_events。"
+                            "如需交代前情，只能用极短、影视化的方式自然带出。"
+                        )
+
+                    critic = CriticResult(
+                        hard_pass=False,
+                        hard_errors=hard_issues,
+                        soft_scores={"format": 0, "length": length_soft_score or 0},
+                        rewrite_paragraph_indices=rewrite_indices,
+                        rewrite_instructions=rewrite_instructions,
+                        fact_digest="",
+                        tone_digest="",
+                        state_patch={},
+                    )
+                    state["critic"] = critic.model_dump(mode="json")
+
+                    fix_attempt = int(state.get("fix_attempt") or 0)
+                    if fix_attempt >= max_fix_attempts:
+                        run.status = RunStatus.failed
+                        run.error = {"detail": "max_fix_attempts_exceeded", "hard_errors": critic.hard_errors}
+                        run.state = state
+                        await session.commit()
+                        return {
+                            "phase": phase,
+                            "hard_pass": False,
+                            "hard_errors": critic.hard_errors,
+                            "soft_scores": critic.soft_scores,
+                            "rewrite_paragraph_indices": critic.rewrite_paragraph_indices,
+                            "content_char_count": content_chars,
+                            "target_chars_min": target_min,
+                            "target_chars_max": target_max,
+                            "target_chars_soft_max": target_soft_max,
+                        }
+
+                    cursor["phase"] = "nts_episode_fix"
+                    run.state = state
+                    await session.commit()
+                    return {
+                        "phase": phase,
+                        "hard_pass": False,
+                        "hard_errors": critic.hard_errors,
+                        "soft_scores": critic.soft_scores,
+                        "rewrite_paragraph_indices": critic.rewrite_paragraph_indices,
+                        "content_char_count": content_chars,
+                        "target_chars_min": target_min,
+                        "target_chars_max": target_max,
+                        "target_chars_soft_max": target_soft_max,
+                    }
+
+                raw = await _llm_complete_with_optional_stream(
+                    llm=llm,
+                    system_prompt=load_prompt("nts_critic_system.md"),
+                    user_prompt=render_prompt(
+                        load_prompt("nts_critic_user.md"),
+                        {
+                            "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
+                            "CURRENT_STATE_JSON": json.dumps(current_state, ensure_ascii=False, indent=2),
+                            "NUMBERED_PARAGRAPHS": numbered or "(empty)",
+                            "EVIDENCE_TEXT": evidence_text or "(none)",
+                        },
+                    ),
+                    hub=hub,
+                    run_id=run.id,
+                    step_id=step_id,
+                    step_name="nts_episode_critic",
+                )
+                payload = extract_json_object(raw)
+                critic = CriticResult.model_validate(payload)
+                if (not critic.hard_pass) and (not critic.rewrite_paragraph_indices) and paragraphs:
+                    critic.rewrite_paragraph_indices = list(range(1, len(paragraphs) + 1))
+                critic.soft_scores = dict(critic.soft_scores or {})
+                critic.soft_scores["length"] = length_soft_score or 0
+                state["critic"] = critic.model_dump(mode="json")
+
+                fix_attempt = int(state.get("fix_attempt") or 0)
+                if not critic.hard_pass or critic.rewrite_paragraph_indices:
+                    if fix_attempt >= max_fix_attempts:
+                        run.status = RunStatus.failed
+                        run.error = {"detail": "max_fix_attempts_exceeded", "hard_errors": critic.hard_errors}
+                        run.state = state
+                        await session.commit()
+                        return {"phase": phase, "hard_pass": False, "hard_errors": critic.hard_errors}
+                    cursor["phase"] = "nts_episode_fix"
+                else:
+                    cursor["phase"] = "nts_episode_commit"
+
+                run.state = state
+                await session.commit()
+                return {
+                    "phase": phase,
+                    "hard_pass": critic.hard_pass,
+                    "hard_errors": critic.hard_errors,
+                    "soft_scores": critic.soft_scores,
+                    "rewrite_paragraph_indices": critic.rewrite_paragraph_indices,
+                    "content_char_count": content_chars,
+                    "target_chars_min": target_min,
+                    "target_chars_max": target_max,
+                    "target_chars_soft_max": target_soft_max,
+                }
+
+            if phase == "nts_episode_fix":
+                critic_json = state.get("critic") or {}
+                critic = CriticResult.model_validate(critic_json)
+                draft_state = state.get("draft") or {}
+                draft_text = str(draft_state.get("text") or "")
+                paragraphs, numbered = numbered_paragraphs(draft_text)
+
+                raw = await _llm_complete_with_optional_stream(
+                    llm=llm,
+                    system_prompt=load_prompt("rewrite_system.md"),
+                    user_prompt=render_prompt(
+                        load_prompt("nts_episode_rewrite_user.md"),
+                        {
+                            "BRIEF_JSON": json.dumps(brief_json_for_conversion, ensure_ascii=False, indent=2),
+                            "CURRENT_STATE_JSON": json.dumps(current_state, ensure_ascii=False, indent=2),
+                            "EPISODE_JSON": json.dumps(episode_json, ensure_ascii=False, indent=2),
+                            "EVIDENCE_TEXT": evidence_text or "(none)",
+                            "REWRITE_INSTRUCTIONS": critic.rewrite_instructions or "",
+                            "NUMBERED_PARAGRAPHS": numbered or "(empty)",
+                            "REWRITE_PARAGRAPH_INDICES_JSON": json.dumps(
+                                critic.rewrite_paragraph_indices, ensure_ascii=False, indent=2
+                            ),
+                        },
+                    ),
+                    hub=hub,
+                    run_id=run.id,
+                    step_id=step_id,
+                    step_name="nts_episode_fix",
+                )
+                payload = extract_json_object(raw)
+                rewrite = RewriteResult.model_validate(payload)
+                replacements = {int(k): v for k, v in rewrite.replacements.items()}
+                updated_paragraphs = apply_replacements(paragraphs, replacements)
+                new_text = join_paragraphs(updated_paragraphs)
+                state["draft"] = {
+                    "kind": "episode",
+                    "index": int(episode_index),
+                    "source_chapter_index": int(chapter_index),
+                    "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                    "title": draft_state.get("title"),
+                    "text": new_text,
+                }
+                state.pop("critic", None)
+                state["fix_attempt"] = int(state.get("fix_attempt") or 0) + 1
+                cursor["phase"] = "nts_episode_critic"
+                run.state = state
+                await session.commit()
+                return {"phase": phase, "updated_preview": new_text[:500]}
+
+            if phase == "nts_episode_commit":
+                critic_json = state.get("critic") or {}
+                critic = CriticResult.model_validate(critic_json)
+                if not critic.hard_pass:
+                    run.status = RunStatus.failed
+                    run.error = {"detail": "hard_check_failed", "hard_errors": critic.hard_errors}
+                    run.state = state
+                    await session.commit()
+                    return {"phase": phase, "hard_pass": False, "hard_errors": critic.hard_errors}
+
+                draft_state = state.get("draft") or {}
+                draft_text = str(draft_state.get("text") or "")
+                explicit_title = draft_state.get("title")
+                episode_title = (
+                    str(explicit_title).strip()
+                    if isinstance(explicit_title, str) and str(explicit_title).strip()
+                    else None
+                )
+                if episode_title is None:
+                    episode_title = _extract_episode_title(text=draft_text, episode_index=int(episode_index))
+                if episode_title is None:
+                    suggested = str(sub_plan.title or "").strip()
+                    episode_title = suggested or chapter_title
+
+                artifact = await _get_or_create_artifact(
+                    session=session,
+                    kind=ArtifactKind.script_scene,
+                    ordinal=int(episode_index),
+                    title=episode_title,
+                )
+                version = ArtifactVersion(
+                    artifact_id=artifact.id,
+                    source=ArtifactVersionSource.agent,
+                    content_text=draft_text,
+                    meta={
+                        "fact_digest": critic.fact_digest,
+                        "tone_digest": critic.tone_digest,
+                        "soft_scores": critic.soft_scores,
+                        "episode_index": int(episode_index),
+                        "episode_title": episode_title,
+                        "source_chapter_index": int(chapter_index),
+                        "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                        "chapter_title": chapter_title,
+                        "source_kind": "novel_to_script",
+                    },
+                    workflow_run_id=run.id,
+                    brief_snapshot_id=snapshot.id,
+                )
+                session.add(version)
+                await session.commit()
+                await session.refresh(version)
+
+                if not _rag_is_disabled(state):
+                    try:
+                        await index_artifact_version(
+                            session=session,
+                            embeddings=embeddings,
+                            brief_snapshot_id=snapshot.id,
+                            artifact_version_id=version.id,
+                            content_text=draft_text,
+                            meta={"kind": "script_scene", "ordinal": int(episode_index)},
+                        )
+                    except Exception as exc:
+                        await session.rollback()
+                        _record_embeddings_error(state=state, where="nts_episode_commit:index_artifact_version", exc=exc)
+
+                current_state = deep_merge(current_state, critic.state_patch)
+                state["current_state"] = current_state
+                state.pop("draft", None)
+                state.pop("critic", None)
+                state["fix_attempt"] = 0
+
+                episode_digests = (
+                    list(state.get("script_episode_digests") or [])
+                    if isinstance(state.get("script_episode_digests"), list)
+                    else []
+                )
+                episode_digests.append(
+                    {
+                        "episode_index": int(episode_index),
+                        "episode_title": episode_title,
+                        "source_chapter_index": int(chapter_index),
+                        "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                        "fact_digest": critic.fact_digest,
+                        "tone_digest": critic.tone_digest,
+                    }
+                )
+                state["script_episode_digests"] = episode_digests
+
+                chapter_episode_map = (
+                    list(state.get("chapter_episode_map") or [])
+                    if isinstance(state.get("chapter_episode_map"), list)
+                    else []
+                )
+                chapter_episode_map.append(
+                    {
+                        "episode_index": int(episode_index),
+                        "source_chapter_index": int(chapter_index),
+                        "chapter_episode_sub_index": int(chapter_episode_sub_index),
+                    }
+                )
+                state["chapter_episode_map"] = chapter_episode_map
+
+                state["script_episode_index_next"] = int(state.get("script_episode_index_next") or episode_index) + 1
+
+                next_sub = int(chapter_episode_sub_index) + 1
+                if next_sub <= len(plan.episodes):
+                    cursor["chapter_episode_sub_index"] = next_sub
+                    cursor["episode_index"] = int(state["script_episode_index_next"])
+                    cursor["phase"] = "nts_episode_draft"
+                else:
+                    state.pop("chapter_plan", None)
+                    state.pop("episode_breakdown", None)
+                    current_pos = ordinals.index(int(chapter_index))
+                    next_pos = current_pos + 1
+                    if next_pos >= len(ordinals):
+                        run.status = RunStatus.succeeded
+                        cursor["phase"] = "done"
+                    else:
+                        cursor["chapter_index"] = ordinals[next_pos]
+                        cursor["chapter_episode_sub_index"] = 0
+                        cursor["episode_index"] = int(state["script_episode_index_next"])
+                        cursor["phase"] = "nts_chapter_plan"
+
+                run.state = state
+                await session.commit()
+                return {
+                    "phase": phase,
+                    "artifact_id": str(artifact.id),
+                    "artifact_version_id": str(version.id),
+                    "fact_digest": critic.fact_digest,
+                    "tone_digest": critic.tone_digest,
+                }
+
+            raise RuntimeError(f"unknown_phase:{phase}")
+
+        elif phase.startswith("nts_episode_"):
             sources = await _select_latest_novel_chapter_versions(
                 session=session,
                 brief_snapshot_id=source_snapshot.id,
@@ -1306,7 +2166,7 @@ async def execute_next_step(
                         rewrite_paragraph_indices=rewrite_indices,
                         rewrite_instructions=(
                             "格式修复：只输出这一集的剧本文本，不要包含任何提示词/规则/执行流程/STEP1/STEP2。"
-                            f"本集为第{chapter_index}集，要求集头仅一次（例如“第{chapter_index}集…”或“第十二集…”这类中文数字写法），"
+                            f"本集为第{chapter_index}集，要求集头仅一次且该行只写“第{chapter_index}集”（或使用中文数字写法如“第十二集”），不要附带集名/标题，"
                             f"场号默认使用“{chapter_index}-1 / {chapter_index}-2 …”（也可用“{chapter_index}.1 / {chapter_index}.2 …”）。"
                             "删除重复的集头/错误的场号/重复的场景块，并确保场号递增不重复。"
                         ),

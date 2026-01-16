@@ -46,6 +46,22 @@ class _SlowStubLLM(LLMClient):
         return self.outputs.pop(0)
 
 
+class _StreamingFailsOnceLLM(LLMClient):
+    def __init__(self, *, output: str) -> None:
+        self.output = output
+        self.stream_calls = 0
+        self.complete_calls = 0
+
+    async def complete(self, *, system_prompt: str, user_prompt: str) -> str:
+        self.complete_calls += 1
+        return self.output
+
+    async def stream_complete(self, *, system_prompt: str, user_prompt: str):
+        self.stream_calls += 1
+        yield "{"
+        raise RuntimeError("stream_interrupted")
+
+
 class _StubEmbeddings(EmbeddingsClient):
     async def embed(self, *, texts: list[str]) -> list[list[float]]:
         return [[1.0] + ([0.0] * 1535) for _ in texts]
@@ -80,6 +96,35 @@ async def client_with_slow_llm_and_embeddings(_ensure_test_database: None, test_
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
         yield http_client
+    await app.router.shutdown()
+
+
+@pytest.fixture()
+async def client_with_streaming_error_llm_and_embeddings(_ensure_test_database: None, test_database_url: str):
+    llm = _StreamingFailsOnceLLM(
+        output=json.dumps(
+            {
+                "chapters": [
+                    {
+                        "index": 1,
+                        "title": "第一章",
+                        "summary": "开端。",
+                        "hook": "悬念。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    settings = Settings(
+        database_url=test_database_url,
+        cors_allow_origins="http://localhost:5173,http://127.0.0.1:5173",
+    )
+    app = create_app(settings=settings, llm_client=llm, embeddings_client=_StubEmbeddings())
+    await app.router.startup()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        yield http_client, llm
     await app.router.shutdown()
 
 
@@ -124,3 +169,28 @@ async def test_autorun_stop_prevents_additional_steps(client_with_slow_llm_and_e
     )
     steps_after = steps_resp_after.json()
     assert len(steps_after) == 1
+
+
+async def test_llm_streaming_error_falls_back_to_non_streaming(
+    client_with_streaming_error_llm_and_embeddings,
+):
+    client, llm = client_with_streaming_error_llm_and_embeddings
+
+    brief = await client.post("/api/briefs", json={"title": "测试作品", "content": {}})
+    brief_id = brief.json()["id"]
+    snap = await client.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    run = await client.post(
+        "/api/workflow-runs",
+        json={"kind": "novel", "brief_snapshot_id": snap_id, "status": "queued", "state": {}},
+    )
+    run_id = run.json()["id"]
+
+    resp = await client.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["step"]["status"] == "succeeded"
+    assert body["step"]["step_name"] == "novel_outline"
+    assert llm.stream_calls == 1
+    assert llm.complete_calls == 1

@@ -30,6 +30,10 @@ def determine_step_name(run: WorkflowRun) -> str:
     if run.kind == WorkflowKind.script:
         return "script_scene_list"
     if run.kind == WorkflowKind.novel_to_script:
+        state = run.state or {}
+        split_mode = state.get("split_mode") if isinstance(state, dict) else None
+        if split_mode == "auto_by_length":
+            return "nts_chapter_plan"
         return "nts_episode_breakdown"
     return "start"
 

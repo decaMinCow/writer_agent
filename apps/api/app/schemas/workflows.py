@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,12 +11,18 @@ from app.db.models import RunStatus, WorkflowKind
 from app.schemas.briefs import OutputSpecOverrides
 
 
+class NovelToScriptSplitMode(str, Enum):
+    chapter_unit = "chapter_unit"
+    auto_by_length = "auto_by_length"
+
+
 class WorkflowRunCreate(BaseModel):
     kind: WorkflowKind
     brief_snapshot_id: uuid.UUID
     source_brief_snapshot_id: uuid.UUID | None = None
     conversion_output_spec: OutputSpecOverrides | None = None
     prompt_preset_id: str | None = None
+    split_mode: NovelToScriptSplitMode | None = None
     status: RunStatus = Field(default=RunStatus.queued)
     state: dict[str, Any] = Field(default_factory=dict)
 

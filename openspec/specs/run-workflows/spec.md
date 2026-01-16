@@ -52,7 +52,7 @@ The system SHALL allow applying a natural-language intervention to a workflow ru
 - **AND** the system SHALL record the intervention as a `workflow_step_runs` entry
 
 ### Requirement: Configure novel→script run inputs at creation time
-The system SHALL allow providing a source snapshot and a prompt preset when creating a `novel_to_script` workflow run.
+The system SHALL allow providing a source snapshot, a prompt preset, and a split mode when creating a `novel_to_script` workflow run.
 
 #### Scenario: Create a novel→script run with a different source snapshot
 - **GIVEN** two Snapshots exist for the same Brief
@@ -64,6 +64,15 @@ The system SHALL allow providing a source snapshot and a prompt preset when crea
 #### Scenario: Create a novel→script run with a prompt preset
 - **WHEN** the user creates a `novel_to_script` workflow run with `prompt_preset_id`
 - **THEN** the system SHALL persist the chosen preset id in the workflow run state for later execution
+
+#### Scenario: Create a novel→script run with a split mode
+- **WHEN** the user creates a `novel_to_script` workflow run with `split_mode`
+- **THEN** the system SHALL persist the chosen split mode in the workflow run state for later execution
+
+#### Scenario: Missing split mode falls back to chapter-unit behavior
+- **GIVEN** a novel→script workflow run is created without `split_mode`
+- **WHEN** the workflow executes
+- **THEN** the system SHALL behave as `1章=1集` by default
 
 #### Scenario: Reject a source snapshot from another brief
 - **GIVEN** a source snapshot exists but belongs to a different Brief than the run snapshot

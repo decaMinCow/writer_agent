@@ -541,6 +541,7 @@ export async function createWorkflowRun(payload: {
 	brief_snapshot_id: string;
 	source_brief_snapshot_id?: string | null;
 	prompt_preset_id?: string | null;
+	split_mode?: 'chapter_unit' | 'auto_by_length' | null;
 	conversion_output_spec?:
 		| {
 				script_format?: ScriptFormat | null;
@@ -556,6 +557,7 @@ export async function createWorkflowRun(payload: {
 			brief_snapshot_id: payload.brief_snapshot_id,
 			source_brief_snapshot_id: payload.source_brief_snapshot_id ?? null,
 			prompt_preset_id: payload.prompt_preset_id ?? null,
+			split_mode: payload.split_mode ?? null,
 			conversion_output_spec: payload.conversion_output_spec ?? null,
 			state: payload.state ?? {},
 		}),

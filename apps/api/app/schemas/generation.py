@@ -147,6 +147,37 @@ class EpisodeBreakdown(BaseModel):
     hook_idea: str = Field(default="")
 
 
+class NtsChapterPlanEpisode(BaseModel):
+    sub_index: int = Field(ge=1)
+    title: str = Field(default="")
+    key_events: list[str] = Field(default_factory=list, min_length=1)
+    conflicts: list[str] = Field(default_factory=list)
+    emotional_beats: list[str] = Field(default_factory=list)
+    relationship_changes: list[str] = Field(default_factory=list)
+    hook_idea: str = Field(default="")
+
+
+class NtsChapterPlan(BaseModel):
+    chapter_index: int = Field(ge=1)
+    chapter_title: str = Field(default="")
+    core_plot: list[str] = Field(default_factory=list, min_length=1)
+    episodes: list[NtsChapterPlanEpisode] = Field(min_length=1)
+
+    @field_validator("episodes")
+    @classmethod
+    def _validate_episodes(cls, value: list[NtsChapterPlanEpisode]) -> list[NtsChapterPlanEpisode]:
+        if not value:
+            return value
+        indices = [ep.sub_index for ep in value]
+        if len(indices) != len(set(indices)):
+            raise ValueError("duplicate_sub_index")
+        if indices != sorted(indices):
+            raise ValueError("sub_index_not_monotonic")
+        if indices[0] != 1:
+            raise ValueError("sub_index_must_start_at_1")
+        return value
+
+
 class CommittedArtifact(BaseModel):
     model_config = ConfigDict(extra="allow")
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import copy
+import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import AppSetting
+from app.db.models import AppSetting, Brief
 from app.schemas.briefs import ScriptFormat
 from app.services.json_utils import deep_merge
 
@@ -221,6 +222,47 @@ async def patch_output_spec_defaults(
 
     await session.commit()
     return await get_output_spec_defaults(session=session)
+
+
+async def resolve_runtime_execution_preferences(
+    *,
+    session: AsyncSession,
+    brief_id: uuid.UUID,
+) -> dict[str, Any]:
+    defaults = await get_output_spec_defaults(session=session)
+
+    overrides: dict[str, Any] = {}
+    brief = await session.get(Brief, brief_id)
+    if brief is not None and isinstance(brief.content, dict):
+        output_spec = brief.content.get("output_spec")
+        if isinstance(output_spec, dict):
+            overrides = dict(output_spec)
+
+    merged = deep_merge(defaults, overrides)
+
+    def _as_int(key: str, *, fallback: int) -> int:
+        raw = merged.get(key)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = fallback
+        return max(0, value)
+
+    def _as_float(key: str, *, fallback: float) -> float:
+        raw = merged.get(key)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = fallback
+        return max(0.0, value)
+
+    return {
+        "max_fix_attempts": _as_int("max_fix_attempts", fallback=int(defaults.get("max_fix_attempts") or 0)),
+        "auto_step_retries": _as_int("auto_step_retries", fallback=int(defaults.get("auto_step_retries") or 0)),
+        "auto_step_backoff_s": _as_float(
+            "auto_step_backoff_s", fallback=float(defaults.get("auto_step_backoff_s") or 0.0)
+        ),
+    }
 
 
 async def get_novel_to_script_prompt_defaults(*, session: AsyncSession) -> dict[str, Any]:

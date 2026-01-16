@@ -33,6 +33,7 @@ from app.services import cascade_delete
 from app.services.error_utils import format_exception_chain
 from app.services.json_utils import deep_merge
 from app.services.llm_provider import resolve_llm_and_embeddings, resolve_llm_client
+from app.services.settings_store import resolve_runtime_execution_preferences
 from app.services.workflow_events import WorkflowEventHub, format_sse_event
 from app.services.workflow_executor import execute_next_step
 from app.services.workflow_intervention import build_workflow_intervention
@@ -56,16 +57,22 @@ def _reset_failed_cursor_phase(state: dict[str, Any]) -> dict[str, Any]:
     return next_state
 
 
-def _output_spec_from_snapshot(snapshot: BriefSnapshot | None) -> dict[str, Any]:
-    if snapshot is None:
-        return {}
-    content = snapshot.content
-    if not isinstance(content, dict):
-        return {}
-    output_spec = content.get("output_spec")
-    if not isinstance(output_spec, dict):
-        return {}
-    return dict(output_spec)
+def _reset_failed_fix_attempts(*, state: dict[str, Any], error: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(error, dict):
+        return state
+    if str(error.get("detail") or "") != "max_fix_attempts_exceeded":
+        return state
+    next_state = dict(state)
+    next_state["fix_attempt"] = 0
+    return next_state
+
+
+def _reset_failed_autorun_retry_state(state: dict[str, Any]) -> dict[str, Any]:
+    if "_autorun_retry" not in state:
+        return state
+    next_state = dict(state)
+    next_state.pop("_autorun_retry", None)
+    return next_state
 
 
 def _coerce_int(value: object, *, default: int, min_value: int = 0) -> int:
@@ -84,10 +91,16 @@ def _coerce_float(value: object, *, default: float, min_value: float = 0.0) -> f
     return max(min_value, parsed)
 
 
-def _resolve_autorun_retry_policy(*, snapshot: BriefSnapshot | None) -> tuple[int, float]:
-    output_spec = _output_spec_from_snapshot(snapshot)
-    retries = _coerce_int(output_spec.get("auto_step_retries"), default=3, min_value=0)
-    backoff_s = _coerce_float(output_spec.get("auto_step_backoff_s"), default=1.0, min_value=0.0)
+async def _resolve_autorun_retry_policy(
+    *,
+    session: AsyncSession,
+    snapshot: BriefSnapshot | None,
+) -> tuple[int, float]:
+    if snapshot is None:
+        return 3, 1.0
+    runtime = await resolve_runtime_execution_preferences(session=session, brief_id=snapshot.brief_id)
+    retries = _coerce_int(runtime.get("auto_step_retries"), default=3, min_value=0)
+    backoff_s = _coerce_float(runtime.get("auto_step_backoff_s"), default=1.0, min_value=0.0)
     return retries, backoff_s
 
 
@@ -101,6 +114,9 @@ def _is_retryable_step_failure(*, run_error: dict[str, Any] | None, step_error: 
 
     error_type = str(run_error.get("error_type") or "")
     if error_type in {"APIConnectionError", "APITimeoutError"}:
+        return True
+    if error_type == "APIError":
+        # The OpenAI Python SDK uses APIError for some transient failures, including stream interruptions.
         return True
     if error_type in {"JSONDecodeError", "ValidationError"}:
         return True
@@ -158,6 +174,9 @@ async def create_workflow_run(
     prompt_preset_id = (payload.prompt_preset_id or "").strip() or None
 
     if payload.kind == WorkflowKind.novel_to_script:
+        if payload.split_mode is not None:
+            state["split_mode"] = payload.split_mode.value
+
         if payload.source_brief_snapshot_id is not None:
             source = await session.get(BriefSnapshot, payload.source_brief_snapshot_id)
             if not source:
@@ -176,6 +195,8 @@ async def create_workflow_run(
     elif payload.kind == WorkflowKind.script:
         if payload.source_brief_snapshot_id is not None or payload.conversion_output_spec is not None:
             raise HTTPException(status_code=400, detail="unsupported_workflow_inputs")
+        if payload.split_mode is not None:
+            raise HTTPException(status_code=400, detail="unsupported_workflow_inputs")
         if prompt_preset_id is not None:
             state["prompt_preset_id"] = prompt_preset_id
 
@@ -184,6 +205,7 @@ async def create_workflow_run(
             payload.source_brief_snapshot_id is not None
             or payload.conversion_output_spec is not None
             or payload.prompt_preset_id is not None
+            or payload.split_mode is not None
         ):
             raise HTTPException(status_code=400, detail="unsupported_workflow_inputs")
 
@@ -583,9 +605,13 @@ async def execute_workflow_next(
         raise HTTPException(status_code=400, detail="workflow_run_not_runnable")
 
     if run.status == RunStatus.failed:
+        prev_error = run.error if isinstance(run.error, dict) else None
         run.status = RunStatus.queued
         run.error = None
-        run.state = _reset_failed_cursor_phase(dict(run.state or {}))
+        next_state = _reset_failed_cursor_phase(dict(run.state or {}))
+        next_state = _reset_failed_fix_attempts(state=next_state, error=prev_error)
+        next_state = _reset_failed_autorun_retry_state(next_state)
+        run.state = next_state
         await session.commit()
         await session.refresh(run)
 
@@ -636,7 +662,9 @@ async def _autorun_loop(app: FastAPI, *, run_id: uuid.UUID, stop_event: asyncio.
                     return
 
                 snapshot = await session.get(BriefSnapshot, run.brief_snapshot_id)
-                max_step_retries, backoff_s = _resolve_autorun_retry_policy(snapshot=snapshot)
+                max_step_retries, backoff_s = await _resolve_autorun_retry_policy(
+                    session=session, snapshot=snapshot
+                )
 
                 llm, embeddings, meta = await resolve_llm_and_embeddings(session=session, app=app)
                 if llm is None or embeddings is None:
@@ -878,9 +906,13 @@ async def autorun_start(
         raise HTTPException(status_code=400, detail="workflow_run_not_runnable")
 
     if run.status == RunStatus.failed:
+        prev_error = run.error if isinstance(run.error, dict) else None
         run.status = RunStatus.queued
         run.error = None
-        run.state = _reset_failed_cursor_phase(dict(run.state or {}))
+        next_state = _reset_failed_cursor_phase(dict(run.state or {}))
+        next_state = _reset_failed_fix_attempts(state=next_state, error=prev_error)
+        next_state = _reset_failed_autorun_retry_state(next_state)
+        run.state = next_state
         await session.commit()
         await session.refresh(run)
 

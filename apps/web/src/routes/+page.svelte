@@ -145,6 +145,7 @@
 	let workflowKindDraft: WorkflowRunRead['kind'] = 'novel';
 	let creatingRun = false;
 	let ntsSourceSnapshotIdDraft = '';
+	let ntsSplitModeDraft: 'chapter_unit' | 'auto_by_length' = 'chapter_unit';
 	let stepping = false;
 	let autoRunning = false;
 	let runEvents: EventSource | null = null;
@@ -558,6 +559,7 @@
 		selectedSnapshot = null;
 		selectedStep = null;
 		ntsSourceSnapshotIdDraft = '';
+		ntsSplitModeDraft = 'chapter_unit';
 		workflowSteps = [];
 		artifactVersions = [];
 		selectedArtifactVersion = null;
@@ -1478,6 +1480,7 @@
 				const sourceId = ntsSourceSnapshotIdDraft || selectedSnapshot.id;
 				payload.source_brief_snapshot_id = sourceId !== selectedSnapshot.id ? sourceId : null;
 				payload.prompt_preset_id = ntsPromptPresetIdDraft || null;
+				payload.split_mode = ntsSplitModeDraft === 'auto_by_length' ? 'auto_by_length' : null;
 			} else if (workflowKindDraft === 'script') {
 				payload.prompt_preset_id = scriptPromptPresetIdDraft || null;
 			}
@@ -1752,8 +1755,21 @@
 		const phase = cursor.phase ? String(cursor.phase) : '';
 		const chapter = cursor.chapter_index ? `章${cursor.chapter_index}` : '';
 		const scene = cursor.scene_index ? `场${cursor.scene_index}` : '';
-		const unit =
-			run.kind === 'novel_to_script' && cursor.chapter_index ? `集${cursor.chapter_index}` : chapter || scene;
+		const splitMode = (run.state as any)?.split_mode as any;
+		const unit = (() => {
+			if (run.kind === 'novel_to_script') {
+				const ep = cursor.episode_index ? Number(cursor.episode_index) : 0;
+				const ch = cursor.chapter_index ? Number(cursor.chapter_index) : 0;
+				if (splitMode === 'auto_by_length') {
+					if (ep) return `集${ep}${ch ? `（章${ch}）` : ''}`;
+					if (ch) return `章${ch}`;
+					return '';
+				}
+				if (ch) return `集${ch}`;
+				return '';
+			}
+			return chapter || scene;
+		})();
 		const parts = [phase, unit].filter(Boolean);
 		return parts.join(' · ');
 	}
@@ -1765,7 +1781,9 @@
 		const cursor = (run.state as any)?.cursor as any;
 		const phase = cursor && typeof cursor === 'object' ? String(cursor.phase ?? '') : '';
 		const chapterIndex = cursor && typeof cursor === 'object' ? Number(cursor.chapter_index ?? 0) : 0;
+		const episodeIndex = cursor && typeof cursor === 'object' ? Number(cursor.episode_index ?? 0) : 0;
 		const sceneIndex = cursor && typeof cursor === 'object' ? Number(cursor.scene_index ?? 0) : 0;
+		const splitMode = (run.state as any)?.split_mode as any;
 
 		if (!phase) return `${kindLabel} · 未开始`;
 
@@ -1791,6 +1809,15 @@
 		}
 
 		if (run.kind === 'novel_to_script') {
+			if (splitMode === 'auto_by_length') {
+				const ep = episodeIndex || 1;
+				const chCtx = chapterIndex ? `（章${chapterIndex}）` : '';
+				if (phase === 'nts_chapter_plan') return `${kindLabel} · 章${chapterIndex || 1} · 拆集计划`;
+				if (phase === 'nts_episode_draft') return `${kindLabel} · 第${ep}集${chCtx} · 草稿`;
+				if (phase === 'nts_episode_critic') return `${kindLabel} · 第${ep}集${chCtx} · 审校`;
+				if (phase === 'nts_episode_fix') return `${kindLabel} · 第${ep}集${chCtx} · 修复`;
+				if (phase === 'nts_episode_commit') return `${kindLabel} · 第${ep}集${chCtx} · 提交`;
+			}
 			if (phase === 'nts_episode_breakdown') return `${kindLabel} · 第${chapterIndex || 1}集 · 拆解`;
 			if (phase === 'nts_episode_draft') return `${kindLabel} · 第${chapterIndex || 1}集 · 草稿`;
 			if (phase === 'nts_episode_critic') return `${kindLabel} · 第${chapterIndex || 1}集 · 审校`;
@@ -1832,28 +1859,32 @@
 		}
 
 			function translateCriticHardError(code: string): string {
-				const mapping: Record<string, string> = {
-					dead_character_appears: '已死亡角色再次出现',
-					inventory_impossible: '物品/道具逻辑不成立',
-					presence_conflict: '角色在场/位置冲突',
-					world_rule_violation: '违背世界观硬规则',
-					pov_drift: '视角漂移',
-					ooc_risk: '角色行为可能 OOC',
-					format_prompt_leak: '输出包含提示词/规则/流程文本',
-					format_missing_episode_header: '缺少集头（第X集/第一集）',
-					format_multiple_episode_headers: '集头重复（出现多次第X集）',
-					format_episode_header_mismatch: '集头集数与当前集不匹配',
-					format_missing_scene_blocks: '缺少场景块（X-Y 或 X.Y）',
-					format_scene_numbering_invalid: '场号格式不合法（应为 X-Y 或 X.Y）',
-					format_scene_block_episode_mismatch: '场号集数与当前集不匹配',
-					format_scene_blocks_duplicate: '场号重复',
-					format_scene_blocks_not_monotonic: '场号未递增',
-					format_multiple_scene_blocks: '单场输出包含多个场景块（如 1-1/1-2…）',
-					format_multiple_scene_headings: '单场输出包含多个 INT./EXT. 场景标题',
-					empty_draft: '草稿为空',
-				};
-				return mapping[code] ?? code;
-			}
+					const mapping: Record<string, string> = {
+						dead_character_appears: '已死亡角色再次出现',
+						inventory_impossible: '物品/道具逻辑不成立',
+						presence_conflict: '角色在场/位置冲突',
+						world_rule_violation: '违背世界观硬规则',
+						pov_drift: '视角漂移',
+						ooc_risk: '角色行为可能 OOC',
+						format_prompt_leak: '输出包含提示词/规则/流程文本',
+						format_missing_episode_header: '缺少集头（第X集/第一集）',
+						format_multiple_episode_headers: '集头重复（出现多次第X集）',
+						format_episode_header_mismatch: '集头集数与当前集不匹配',
+						format_episode_header_has_title: '集头不应附带集名/标题（仅“第X集”）',
+						format_missing_scene_blocks: '缺少场景块（X-Y 或 X.Y）',
+						format_scene_numbering_invalid: '场号格式不合法（应为 X-Y 或 X.Y）',
+						format_scene_block_episode_mismatch: '场号集数与当前集不匹配',
+						format_scene_blocks_duplicate: '场号重复',
+						format_scene_blocks_not_monotonic: '场号未递增',
+						format_multiple_scene_blocks: '单场输出包含多个场景块（如 1-1/1-2…）',
+						format_multiple_scene_headings: '单场输出包含多个 INT./EXT. 场景标题',
+						length_too_short: '字数过短（需扩写）',
+						length_too_long: '字数过长（需压缩）',
+						content_duplicate_previous_episode: '本集内容与已提交剧本集重复度过高（需去重推进）',
+						empty_draft: '草稿为空',
+					};
+					return mapping[code] ?? code;
+				}
 
 	$: {
 		const snapshotId = selectedSnapshot?.id;
@@ -2264,8 +2295,23 @@
 												提示：模板在右侧「设置」里管理；默认使用全局默认模板；不再使用 Snapshot/Brief 的“格式备注”作为转写规范。
 											</div>
 										</label>
-										</div>
-									{/if}
+
+										<label class="block">
+											<div class="mb-1 text-[10px] text-zinc-500">拆分方式</div>
+											<select
+												class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200"
+												bind:value={ntsSplitModeDraft}
+												disabled={creatingRun}
+											>
+												<option value="chapter_unit">按章（1章=1集）</option>
+												<option value="auto_by_length">按字数自动拆集（动态）</option>
+											</select>
+											<div class="mt-1 text-[10px] text-zinc-500">
+												提示：自动拆集会先对每章做一次「拆集计划」，再逐集生成/审校/提交（总集数动态）。
+											</div>
+										</label>
+									</div>
+								{/if}
 							</div>
 						{/if}
 
@@ -2861,6 +2907,10 @@
 										disabled={savingGlobalPrefs}
 									/>
 								</label>
+								<div class="text-[10px] text-zinc-500">
+									说明：这三项是执行稳定性参数（自动修复/自动重试），会影响小说/剧本/小说→剧本的工作流，并对已创建 Run
+									生效（从下一步/下一次重试开始）。
+								</div>
 								<button
 									class="w-full rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
 									onclick={saveGlobalPrefs}
@@ -3107,6 +3157,9 @@
 									<div class="mb-2 text-[11px] text-zinc-500">
 										当前生效：{effective.language} · 自动修复 {effective.max_fix_attempts} 次 · 步骤重试{' '}
 										{effective.auto_step_retries} 次 · 退避 {effective.auto_step_backoff_s}s
+									</div>
+									<div class="mb-2 text-[10px] text-zinc-500">
+										提示：修改「自动修复/步骤重试/退避」会对该 Brief 下已创建的 Run 生效（从下一步/下一次重试开始）。
 									</div>
 								{/if}
 							{/if}

@@ -666,6 +666,69 @@ async def test_novel_to_script_format_guard_triggers_fix_when_multiple_scene_blo
     assert "format_multiple_scene_blocks" in body["step"]["outputs"]["hard_errors"]
 
 
+async def test_max_fix_attempts_uses_latest_settings_without_new_snapshot(client_with_llm_and_embeddings):
+    patched = await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"max_fix_attempts": 0},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["max_fix_attempts"] == 0
+
+    brief = await client_with_llm_and_embeddings.post(
+        "/api/briefs",
+        json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}},
+    )
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+    assert snap.json()["content"]["output_spec"]["max_fix_attempts"] == 0
+
+    draft_text = "1-1\n\n第一段。\n\n1-2\n\n第二段。"
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "queued",
+            "state": {
+                "cursor": {"phase": "nts_scene_critic", "scene_index": 1},
+                "scene_list": {
+                    "scenes": [
+                        {
+                            "index": 1,
+                            "slug": "ep1_s01",
+                            "title": "开场",
+                            "location": "杂货铺",
+                            "time": "黄昏",
+                            "characters": ["陈皮"],
+                            "purpose": "交代背景。",
+                        }
+                    ]
+                },
+                "draft": {"kind": "scene", "index": 1, "slug": "ep1_s01", "text": draft_text},
+                "fix_attempt": 0,
+            },
+        },
+    )
+    run_id = run.json()["id"]
+
+    patched2 = await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"max_fix_attempts": 2},
+    )
+    assert patched2.status_code == 200
+    assert patched2.json()["max_fix_attempts"] == 2
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run"]["status"] == "running"
+    assert body["run"]["state"]["cursor"]["phase"] == "nts_scene_fix"
+    assert body["step"]["step_name"] == "nts_scene_critic"
+    assert body["step"]["outputs"]["hard_pass"] is False
+    assert "format_multiple_scene_blocks" in body["step"]["outputs"]["hard_errors"]
+
+
 async def test_novel_to_script_format_guard_persists_phase_change_when_only_cursor_changes(
     client_with_llm_and_embeddings,
 ):
@@ -1137,7 +1200,7 @@ async def test_novel_to_script_uses_latest_chapter_versions_for_scene_list(
     assert "旧摘要" not in prompt
 
 
-async def test_novel_to_script_happy_path_and_honors_script_format(
+async def test_novel_to_script_happy_path_overrides_script_format_to_custom(
     client_with_llm_and_embeddings, llm_stub
 ):
     brief = await client_with_llm_and_embeddings.post(
@@ -1218,7 +1281,7 @@ async def test_novel_to_script_happy_path_and_honors_script_format(
     assert step2.json()["step"]["status"] == "succeeded"
     assert llm_stub.calls
     draft_prompt = llm_stub.calls[-1]["user_prompt"]
-    assert '"script_format": "stage_play"' in draft_prompt
+    assert '"script_format": "custom"' in draft_prompt
 
     step3 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
     assert step3.status_code == 200
@@ -1383,7 +1446,10 @@ async def test_novel_to_script_conversion_output_spec_overrides_snapshot(client_
         )
     )
     llm_stub.outputs.append(
-        json.dumps({"title": "夜里来电", "text": "第1集 夜里来电\\n\\n1.1\\n夜\\n内\\n地点：公寓客厅\\n出场人物：主角\\n\\n主角：谁？"}, ensure_ascii=False)
+        json.dumps(
+            {"title": "夜里来电", "text": "第1集\\n\\n1.1\\n夜\\n内\\n地点：公寓客厅\\n出场人物：主角\\n\\n主角：谁？"},
+            ensure_ascii=False,
+        )
     )
 
     step1 = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
@@ -1462,6 +1528,35 @@ async def test_next_allows_retry_when_run_is_failed(client_with_llm_and_embeddin
     assert body["step"]["status"] == "succeeded"
     assert body["run"]["status"] == "running"
     assert body["run"]["error"] is None
+
+
+async def test_next_resets_fix_attempt_when_failed_due_to_max_fix_attempts_exceeded(client_with_llm_and_embeddings):
+    brief = await client_with_llm_and_embeddings.post("/api/briefs", json={"title": "测试作品", "content": {}})
+    brief_id = brief.json()["id"]
+    snap = await client_with_llm_and_embeddings.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    snap_id = snap.json()["id"]
+
+    run = await client_with_llm_and_embeddings.post(
+        "/api/workflow-runs",
+        json={
+            "kind": "novel_to_script",
+            "brief_snapshot_id": snap_id,
+            "status": "failed",
+            "state": {"cursor": {"phase": "nts_episode_fix", "chapter_index": 1}, "fix_attempt": 2},
+        },
+    )
+    run_id = run.json()["id"]
+
+    patched = await client_with_llm_and_embeddings.patch(
+        f"/api/workflow-runs/{run_id}", json={"error": {"detail": "max_fix_attempts_exceeded"}}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "failed"
+
+    resp = await client_with_llm_and_embeddings.post(f"/api/workflow-runs/{run_id}/next")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run"]["state"].get("fix_attempt") == 0
 
 
 async def test_next_returns_error_chain_when_step_fails(client_with_llm_and_embeddings):

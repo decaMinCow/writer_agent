@@ -84,9 +84,9 @@ async def test_novel_to_script_episode_format_guard_routes_to_fix(client_with_ll
 
     # Draft contains duplicated episode headers and duplicated/non-monotonic scene numbers.
     draft_text = (
-        "第1集 开场\n\n"
+        "第1集\n\n"
         "1-1\n日\n内\n地点：杂货铺\n出场人物：主角\n\n主角：开始。\n\n"
-        "第1集 再来一次\n\n"
+        "第1集\n\n"
         "1-1\n夜\n外\n地点：街口\n出场人物：主角\n\n主角：重复了。\n"
     )
 
@@ -134,7 +134,7 @@ async def test_novel_to_script_episode_accepts_chinese_episode_header(client_wit
     )
 
     draft_text = (
-        "第一集 开场\n\n"
+        "第一集\n\n"
         "1-1\n日\n内\n地点：杂货铺\n出场人物：主角\n\n△昏黄灯光。\n主角：开始。\n"
     )
 
@@ -226,7 +226,7 @@ async def test_novel_to_script_episode_happy_path_commits_one_script_per_chapter
             json.dumps(
                 {
                     "title": "开场",
-                    "text": "第1集 开场\n\n1-1\n日\n内\n地点：杂货铺\n出场人物：主角\n\n△杂货铺昏黄。\n主角：今天不对劲。\n\n1-2\n日\n外\n地点：门口\n出场人物：主角\n\n△风铃大作。\n主角：谁在外面？",
+                    "text": "第1集\n\n1-1\n日\n内\n地点：杂货铺\n出场人物：主角\n\n△杂货铺昏黄。\n主角：今天不对劲。\n\n1-2\n日\n外\n地点：门口\n出场人物：主角\n\n△风铃大作。\n主角：谁在外面？",
                 },
                 ensure_ascii=False,
             ),
@@ -258,7 +258,7 @@ async def test_novel_to_script_episode_happy_path_commits_one_script_per_chapter
             json.dumps(
                 {
                     "title": "升级",
-                    "text": "第2集 升级\n\n2-1\n夜\n内\n地点：杂货铺\n出场人物：主角\n\n△灯光闪烁。\n主角：它来了。\n\n2-2\n夜\n外\n地点：街口\n出场人物：主角\n\n△黑影逼近。\n主角：别过来！",
+                    "text": "第2集\n\n2-1\n夜\n内\n地点：杂货铺\n出场人物：主角\n\n△灯光闪烁。\n主角：它来了。\n\n2-2\n夜\n外\n地点：街口\n出场人物：主角\n\n△黑影逼近。\n主角：别过来！",
                 },
                 ensure_ascii=False,
             ),
