@@ -127,6 +127,10 @@ async def test_story_linter_duplicate_ordinals_produces_hard_issue(client_with_l
 
 
 async def test_story_linter_missing_int_ext_heading_produces_soft_issue(client_with_llm):
+    await client_with_llm.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "screenplay_int_ext"},
+    )
     brief = await client_with_llm.post(
         "/api/briefs",
         json={"title": "测试作品", "content": {"output_spec": {"script_format": "screenplay_int_ext"}}},
@@ -184,6 +188,10 @@ async def test_story_linter_can_include_llm_issues(client_with_llm, llm_stub):
         )
     )
 
+    await client_with_llm.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "stage_play"},
+    )
     brief = await client_with_llm.post(
         "/api/briefs",
         json={"title": "测试作品", "content": {"output_spec": {"script_format": "stage_play"}}},
@@ -211,4 +219,3 @@ async def test_story_linter_can_include_llm_issues(client_with_llm, llm_stub):
     assert len(issues) == 1
     assert issues[0]["code"] == "pov_drift"
     assert issues[0]["metadata"]["recommended_pov"] == "third_limited"
-

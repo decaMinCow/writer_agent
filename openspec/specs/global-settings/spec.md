@@ -4,7 +4,7 @@
 TBD - created by archiving change add-ui-brief-snapshot-preferences. Update Purpose after archive.
 ## Requirements
 ### Requirement: Global output preferences
-The system SHALL persist and expose global default output preferences for the single-user app.
+The system SHALL persist and expose global default output preferences for the single-user app, and apply those defaults to snapshots and workflows.
 
 #### Scenario: Get global defaults
 - **WHEN** the client requests global output preferences
@@ -14,6 +14,10 @@ The system SHALL persist and expose global default output preferences for the si
 #### Scenario: Update global defaults
 - **WHEN** the client updates global output preferences
 - **THEN** the system SHALL persist the new defaults and return the updated values
+
+#### Scenario: Apply global defaults to snapshots
+- **WHEN** global defaults are updated
+- **THEN** newly created snapshots SHALL use those defaults for preference fields in `output_spec`
 
 ### Requirement: Global novel→script prompt defaults
 The system SHALL persist and expose a global default prompt (text) used by the `novel_to_script` workflow when run-level conversion notes and snapshot-level notes are not provided.

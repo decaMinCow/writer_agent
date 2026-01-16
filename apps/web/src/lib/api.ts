@@ -361,23 +361,6 @@ export async function clearLicense(): Promise<LicenseStatus> {
 	});
 }
 
-export async function patchBriefOutputSpecOverrides(
-	briefId: string,
-	payload: {
-		language?: string | null;
-		script_format?: ScriptFormat | null;
-		script_format_notes?: string | null;
-		max_fix_attempts?: number | null;
-		auto_step_retries?: number | null;
-		auto_step_backoff_s?: number | null;
-	},
-): Promise<BriefRead> {
-	return await fetchJson<BriefRead>(`/api/briefs/${briefId}/output-spec`, {
-		method: 'PATCH',
-		body: JSON.stringify(payload),
-	});
-}
-
 export type BriefMessageRead = {
 	id: string;
 	brief_id: string;

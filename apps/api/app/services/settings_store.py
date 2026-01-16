@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import AppSetting, Brief
+from app.db.models import AppSetting
 from app.schemas.briefs import ScriptFormat
 from app.services.json_utils import deep_merge
 
@@ -230,15 +230,7 @@ async def resolve_runtime_execution_preferences(
     brief_id: uuid.UUID,
 ) -> dict[str, Any]:
     defaults = await get_output_spec_defaults(session=session)
-
-    overrides: dict[str, Any] = {}
-    brief = await session.get(Brief, brief_id)
-    if brief is not None and isinstance(brief.content, dict):
-        output_spec = brief.content.get("output_spec")
-        if isinstance(output_spec, dict):
-            overrides = dict(output_spec)
-
-    merged = deep_merge(defaults, overrides)
+    merged = defaults
 
     def _as_int(key: str, *, fallback: int) -> int:
         raw = merged.get(key)

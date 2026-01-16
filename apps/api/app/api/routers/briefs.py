@@ -260,6 +260,15 @@ async def create_snapshot(
 
     content = dict(brief.content or {})
     output_spec_overrides = dict(content.get("output_spec") or {})
+    for key in (
+        "language",
+        "script_format",
+        "script_format_notes",
+        "max_fix_attempts",
+        "auto_step_retries",
+        "auto_step_backoff_s",
+    ):
+        output_spec_overrides.pop(key, None)
     defaults = await get_output_spec_defaults(session=session)
     content["output_spec"] = _deep_merge(defaults, output_spec_overrides)
 

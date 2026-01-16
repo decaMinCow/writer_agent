@@ -36,7 +36,6 @@
 		exportScriptFountain,
 		exportScriptText,
 		updateOpenThread,
-		patchBriefOutputSpecOverrides,
 		patchGlobalOutputSpecDefaults,
 		patchPromptPresets,
 		patchLlmProviderSettings,
@@ -130,20 +129,6 @@
 	let creatingBrief = false;
 	let newSnapshotLabel = '';
 	let creatingSnapshot = false;
-
-	let overrideLanguage = false;
-	let overrideScriptFormat = false;
-	let overrideScriptNotes = false;
-	let overrideMaxFixAttempts = false;
-	let overrideAutoStepRetries = false;
-	let overrideAutoStepBackoff = false;
-	let briefLanguageDraft = 'zh-CN';
-	let briefScriptFormatDraft: ScriptFormat = 'screenplay_int_ext';
-	let briefScriptNotesDraft = '';
-	let briefMaxFixAttemptsDraft = '2';
-	let briefAutoStepRetriesDraft = '3';
-	let briefAutoStepBackoffDraft = '1';
-	let savingBriefPrefs = false;
 	let showBriefJson = false;
 	let showSnapshotJson = false;
 
@@ -321,55 +306,6 @@
 		propagationImpacts = [];
 	}
 
-	function readBriefOutputSpecOverrides(brief: BriefRead | null): Record<string, unknown> {
-		const content = brief?.content;
-		if (!content || typeof content !== 'object') return {};
-		const output = (content as any).output_spec;
-		if (!output || typeof output !== 'object') return {};
-		return output as Record<string, unknown>;
-	}
-
-	function hasOwn(obj: Record<string, unknown>, key: string): boolean {
-		return Object.prototype.hasOwnProperty.call(obj, key);
-	}
-
-	function effectiveOutputSpec(): OutputSpecDefaults | null {
-		if (!globalOutputSpec) return null;
-		const overrides = readBriefOutputSpecOverrides(selectedBrief);
-
-		const merged: OutputSpecDefaults = { ...globalOutputSpec };
-		if (hasOwn(overrides, 'language') && typeof overrides.language === 'string') {
-			merged.language = overrides.language;
-		}
-		if (hasOwn(overrides, 'script_format') && typeof overrides.script_format === 'string') {
-			merged.script_format = overrides.script_format as ScriptFormat;
-		}
-		if (hasOwn(overrides, 'script_format_notes')) {
-			const v = overrides.script_format_notes;
-			merged.script_format_notes =
-				v === null || typeof v === 'string' ? (v as any) : merged.script_format_notes;
-		}
-		if (hasOwn(overrides, 'max_fix_attempts')) {
-			const v = (overrides as any).max_fix_attempts;
-			const parsed =
-				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
-			if (Number.isFinite(parsed) && parsed >= 0) merged.max_fix_attempts = parsed;
-		}
-		if (hasOwn(overrides, 'auto_step_retries')) {
-			const v = (overrides as any).auto_step_retries;
-			const parsed =
-				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
-			if (Number.isFinite(parsed) && parsed >= 0) merged.auto_step_retries = parsed;
-		}
-		if (hasOwn(overrides, 'auto_step_backoff_s')) {
-			const v = (overrides as any).auto_step_backoff_s;
-			const parsed =
-				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseFloat(v) : NaN;
-			if (Number.isFinite(parsed) && parsed >= 0) merged.auto_step_backoff_s = parsed;
-		}
-
-		return merged;
-	}
 
 	function syncGlobalDrafts() {
 		if (!globalOutputSpec) return;
@@ -417,54 +353,6 @@
 		providerApiKeyDraft = '';
 	}
 
-	function syncBriefOverrideDrafts() {
-		if (!selectedBrief) return;
-		const overrides = readBriefOutputSpecOverrides(selectedBrief);
-		const effective = effectiveOutputSpec();
-
-		overrideLanguage = hasOwn(overrides, 'language');
-		overrideScriptFormat = hasOwn(overrides, 'script_format');
-		overrideScriptNotes = hasOwn(overrides, 'script_format_notes');
-		overrideMaxFixAttempts = hasOwn(overrides, 'max_fix_attempts');
-		overrideAutoStepRetries = hasOwn(overrides, 'auto_step_retries');
-		overrideAutoStepBackoff = hasOwn(overrides, 'auto_step_backoff_s');
-
-		briefLanguageDraft = effective?.language ?? 'zh-CN';
-		briefScriptFormatDraft = effective?.script_format ?? 'screenplay_int_ext';
-		briefScriptNotesDraft = effective?.script_format_notes ?? '';
-		briefMaxFixAttemptsDraft = String(effective?.max_fix_attempts ?? 2);
-		briefAutoStepRetriesDraft = String(effective?.auto_step_retries ?? 3);
-		briefAutoStepBackoffDraft = String(effective?.auto_step_backoff_s ?? 1);
-
-		if (overrideLanguage && typeof overrides.language === 'string') {
-			briefLanguageDraft = overrides.language;
-		}
-		if (overrideScriptFormat && typeof overrides.script_format === 'string') {
-			briefScriptFormatDraft = overrides.script_format as ScriptFormat;
-		}
-		if (overrideScriptNotes) {
-			const v = overrides.script_format_notes;
-			briefScriptNotesDraft = v === null ? '' : typeof v === 'string' ? v : '';
-		}
-		if (overrideMaxFixAttempts) {
-			const v = (overrides as any).max_fix_attempts;
-			const parsed =
-				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
-			if (Number.isFinite(parsed) && parsed >= 0) briefMaxFixAttemptsDraft = String(parsed);
-		}
-		if (overrideAutoStepRetries) {
-			const v = (overrides as any).auto_step_retries;
-			const parsed =
-				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseInt(v, 10) : NaN;
-			if (Number.isFinite(parsed) && parsed >= 0) briefAutoStepRetriesDraft = String(parsed);
-		}
-		if (overrideAutoStepBackoff) {
-			const v = (overrides as any).auto_step_backoff_s;
-			const parsed =
-				typeof v === 'number' ? v : typeof v === 'string' ? Number.parseFloat(v) : NaN;
-			if (Number.isFinite(parsed) && parsed >= 0) briefAutoStepBackoffDraft = String(parsed);
-		}
-	}
 
 	async function refreshAll() {
 		error = null;
@@ -492,7 +380,6 @@
 			]);
 			syncGlobalDrafts();
 			syncPromptPresetDrafts();
-			syncBriefOverrideDrafts();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -636,7 +523,6 @@
 				listBriefMessages(brief.id),
 			]);
 			gapReport = null;
-			syncBriefOverrideDrafts();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -1247,7 +1133,6 @@
 				auto_step_backoff_s: Number.isFinite(backoff) && backoff >= 0 ? backoff : null,
 			});
 			syncGlobalDrafts();
-			syncBriefOverrideDrafts();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -1404,58 +1289,6 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			savingPromptPresets = false;
-		}
-	}
-
-	async function saveBriefPrefs() {
-		if (!selectedBrief) return;
-		error = null;
-		savingBriefPrefs = true;
-		try {
-			const maxFix = Number(briefMaxFixAttemptsDraft);
-			const parsedMaxFix =
-				Number.isFinite(maxFix) && maxFix >= 0 ? Math.floor(maxFix) : null;
-			const retries = Number(briefAutoStepRetriesDraft);
-			const parsedRetries =
-				Number.isFinite(retries) && retries >= 0 ? Math.floor(retries) : null;
-			const backoff = Number(briefAutoStepBackoffDraft);
-			const parsedBackoff = Number.isFinite(backoff) && backoff >= 0 ? backoff : null;
-			const updated = await patchBriefOutputSpecOverrides(selectedBrief.id, {
-				language: overrideLanguage ? briefLanguageDraft.trim() || null : null,
-				max_fix_attempts: overrideMaxFixAttempts ? parsedMaxFix : null,
-				auto_step_retries: overrideAutoStepRetries ? parsedRetries : null,
-				auto_step_backoff_s: overrideAutoStepBackoff ? parsedBackoff : null,
-			});
-			selectedBrief = updated;
-			await refreshAll();
-			syncBriefOverrideDrafts();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			savingBriefPrefs = false;
-		}
-	}
-
-	async function resetBriefPrefsToGlobal() {
-		if (!selectedBrief) return;
-		error = null;
-		savingBriefPrefs = true;
-		try {
-			const updated = await patchBriefOutputSpecOverrides(selectedBrief.id, {
-				language: null,
-				script_format: null,
-				script_format_notes: null,
-				max_fix_attempts: null,
-				auto_step_retries: null,
-				auto_step_backoff_s: null,
-			});
-			selectedBrief = updated;
-			await refreshAll();
-			syncBriefOverrideDrafts();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			savingBriefPrefs = false;
 		}
 	}
 
@@ -3300,99 +3133,6 @@
 					{#if selectedBrief && (rightPaneTab === 'project' || rightPaneTab === 'assets')}
 						{#if rightPaneTab === 'project'}
 						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-							<div class="mb-2 text-xs font-semibold text-zinc-300">输出偏好（本 Brief 覆盖）</div>
-							{#if globalOutputSpec}
-								{@const effective = effectiveOutputSpec()}
-								{#if effective}
-									<div class="mb-2 text-[11px] text-zinc-500">
-										当前生效：{effective.language} · 自动修复 {effective.max_fix_attempts} 次 · 步骤重试{' '}
-										{effective.auto_step_retries} 次 · 退避 {effective.auto_step_backoff_s}s
-									</div>
-									<div class="mb-2 text-[10px] text-zinc-500">
-										提示：修改「自动修复/步骤重试/退避」会对该 Brief 下已创建的 Run 生效（从下一步/下一次重试开始）。
-									</div>
-								{/if}
-							{/if}
-
-							<div class="space-y-3 text-xs">
-								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
-									<label class="flex items-center gap-2 text-zinc-200">
-										<input type="checkbox" bind:checked={overrideLanguage} />
-										<span>覆盖语言</span>
-									</label>
-									<input
-										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
-										placeholder="zh-CN"
-										bind:value={briefLanguageDraft}
-										disabled={!overrideLanguage || savingBriefPrefs}
-									/>
-								</div>
-
-								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
-									<label class="flex items-center gap-2 text-zinc-200">
-										<input type="checkbox" bind:checked={overrideMaxFixAttempts} />
-										<span>覆盖自动修复次数</span>
-									</label>
-									<input
-										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
-										type="number"
-										min="0"
-										step="1"
-										bind:value={briefMaxFixAttemptsDraft}
-										disabled={!overrideMaxFixAttempts || savingBriefPrefs}
-									/>
-								</div>
-
-								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
-									<label class="flex items-center gap-2 text-zinc-200">
-										<input type="checkbox" bind:checked={overrideAutoStepRetries} />
-									<span>覆盖步骤重试次数</span>
-									</label>
-									<input
-										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
-										type="number"
-										min="0"
-										step="1"
-										bind:value={briefAutoStepRetriesDraft}
-										disabled={!overrideAutoStepRetries || savingBriefPrefs}
-									/>
-								</div>
-
-								<div class="grid grid-cols-[1fr_2fr] items-center gap-2">
-									<label class="flex items-center gap-2 text-zinc-200">
-										<input type="checkbox" bind:checked={overrideAutoStepBackoff} />
-									<span>覆盖重试退避（秒）</span>
-									</label>
-									<input
-										class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none disabled:opacity-60"
-										type="number"
-										min="0"
-										step="0.5"
-										bind:value={briefAutoStepBackoffDraft}
-										disabled={!overrideAutoStepBackoff || savingBriefPrefs}
-									/>
-								</div>
-							</div>
-
-							<div class="mt-3 flex gap-2">
-								<button
-									class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
-									onclick={saveBriefPrefs}
-									disabled={savingBriefPrefs}
-								>
-									保存覆盖
-								</button>
-								<button
-									class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
-									onclick={resetBriefPrefsToGlobal}
-									disabled={savingBriefPrefs}
-								>
-									用全局
-								</button>
-							</div>
-						</div>
-
-						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 flex items-center justify-between gap-2">
 								<div class="text-xs font-semibold text-zinc-300">Brief 内容（结构化）</div>
 								<button
@@ -3434,7 +3174,7 @@
 								</button>
 							</div>
 							<div class="mt-2 text-[10px] text-zinc-500">
-								Snapshot 会固化当前 Brief，并写入生效的 output_spec（全局默认 + 本 Brief 覆盖）。
+								Snapshot 会固化当前 Brief，并写入全局默认的 output_spec。
 							</div>
 						</div>
 
@@ -3579,7 +3319,7 @@
 									<div class="mt-2 space-y-1">
 										<div>1) 每生成几章/几集后点「运行」，检查在场/时间线/物品等是否冲突。</div>
 										<div>2) 需要实体列表或更强检查时点「重建」。</div>
-										<div>3) 勾选「LLM 辅助」可发现更多软问题（更慢）；取消则更快更稳。</div>
+										<div>3) 勾选「AI 辅助」可发现更多软问题（更慢）；取消则更快更稳。</div>
 									</div>
 								</details>
 
@@ -3591,7 +3331,7 @@
 										<div class="flex items-center gap-2">
 											<label class="flex items-center gap-1 text-[10px] text-zinc-400">
 												<input type="checkbox" bind:checked={lintUseLlm} />
-												<span>LLM 辅助</span>
+												<span>AI 辅助</span>
 											</label>
 											<button
 												class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold hover:bg-emerald-600 disabled:opacity-50"

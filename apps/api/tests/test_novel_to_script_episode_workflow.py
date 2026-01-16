@@ -21,6 +21,10 @@ async def _create_novel_chapter(client, *, snapshot_id: str, ordinal: int, title
 
 
 async def test_novel_to_script_defaults_to_episode_breakdown(client_with_llm_and_embeddings, llm_stub):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "custom"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs", json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}}
     )
@@ -67,6 +71,10 @@ async def test_novel_to_script_defaults_to_episode_breakdown(client_with_llm_and
 
 
 async def test_novel_to_script_episode_format_guard_routes_to_fix(client_with_llm_and_embeddings):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "custom"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs", json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}}
     )
@@ -118,6 +126,10 @@ async def test_novel_to_script_episode_format_guard_routes_to_fix(client_with_ll
 
 
 async def test_novel_to_script_episode_accepts_chinese_episode_header(client_with_llm_and_embeddings, llm_stub):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "custom"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs", json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}}
     )
@@ -181,6 +193,10 @@ async def test_novel_to_script_episode_accepts_chinese_episode_header(client_wit
 async def test_novel_to_script_episode_happy_path_commits_one_script_per_chapter(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "custom"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs", json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}}
     )

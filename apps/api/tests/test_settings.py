@@ -64,7 +64,7 @@ async def test_snapshot_materializes_effective_output_spec(client):
     assert snap.status_code == 200
     snap_content = snap.json()["content"]
     assert snap_content["output_spec"]["language"] == "en-US"
-    assert snap_content["output_spec"]["script_format"] == "screenplay_int_ext"
+    assert snap_content["output_spec"]["script_format"] == "stage_play"
     assert snap_content["output_spec"]["max_fix_attempts"] == 2
     assert snap_content["output_spec"]["auto_step_retries"] == 4
     assert snap_content["output_spec"]["auto_step_backoff_s"] == 0.0

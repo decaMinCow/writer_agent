@@ -34,6 +34,10 @@ def _long_scene_text(*, episode_index: int, title: str) -> str:
 async def test_novel_to_script_auto_split_starts_with_chapter_plan_and_commits_multiple_episodes(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "custom"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs", json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}}
     )
@@ -155,6 +159,10 @@ async def test_novel_to_script_auto_split_starts_with_chapter_plan_and_commits_m
 
 
 async def test_novel_to_script_auto_split_length_too_short_routes_to_fix(client_with_llm_and_embeddings):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "custom"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs", json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}}
     )

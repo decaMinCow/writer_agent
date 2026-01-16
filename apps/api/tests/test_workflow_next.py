@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 
 
+async def _set_global_script_format(client, value: str) -> None:
+    await client.patch("/api/settings/output-spec", json={"script_format": value})
+
+
 async def test_novel_workflow_next_happy_path(client_with_llm_and_embeddings, llm_stub):
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
@@ -93,6 +97,10 @@ async def test_novel_workflow_next_happy_path(client_with_llm_and_embeddings, ll
 
 
 async def test_script_workflow_next_happy_path(client_with_llm_and_embeddings, llm_stub):
+    await client_with_llm_and_embeddings.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "screenplay_int_ext"},
+    )
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={
@@ -352,6 +360,7 @@ async def test_novel_to_script_fails_when_no_novel_sources(client_with_llm_and_e
 async def test_novel_to_script_prefers_snapshot_notes_over_global_when_run_notes_missing(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     patched = await client_with_llm_and_embeddings.patch(
         "/api/settings/prompt-presets",
         json={
@@ -430,6 +439,7 @@ async def test_novel_to_script_prefers_snapshot_notes_over_global_when_run_notes
 async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_and_run_notes_missing(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     patched = await client_with_llm_and_embeddings.patch(
         "/api/settings/prompt-presets",
         json={
@@ -505,6 +515,7 @@ async def test_novel_to_script_uses_global_prompt_when_snapshot_notes_missing_an
 
 
 async def test_novel_to_script_prompt_preset_id_overrides_global_default(client_with_llm_and_embeddings, llm_stub):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     patched = await client_with_llm_and_embeddings.patch(
         "/api/settings/prompt-presets",
         json={
@@ -586,6 +597,7 @@ async def test_novel_to_script_prompt_preset_id_overrides_global_default(client_
 async def test_novel_to_script_format_guard_triggers_fix_when_multiple_scene_blocks_present(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={
@@ -732,6 +744,7 @@ async def test_max_fix_attempts_uses_latest_settings_without_new_snapshot(client
 async def test_novel_to_script_format_guard_persists_phase_change_when_only_cursor_changes(
     client_with_llm_and_embeddings,
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={"title": "测试作品", "content": {"output_spec": {"script_format": "custom"}}},
@@ -798,6 +811,7 @@ async def test_novel_to_script_format_guard_persists_phase_change_when_only_curs
 async def test_novel_to_script_format_autofix_trims_to_single_scene_block(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={
@@ -911,6 +925,7 @@ async def test_novel_to_script_format_autofix_trims_to_single_scene_block(
 async def test_novel_to_script_critic_backfills_rewrite_indices_when_missing(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "custom")
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={
@@ -1203,6 +1218,7 @@ async def test_novel_to_script_uses_latest_chapter_versions_for_scene_list(
 async def test_novel_to_script_happy_path_overrides_script_format_to_custom(
     client_with_llm_and_embeddings, llm_stub
 ):
+    await _set_global_script_format(client_with_llm_and_embeddings, "stage_play")
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={"title": "测试作品", "content": {"output_spec": {"script_format": "stage_play"}}},
@@ -1294,6 +1310,7 @@ async def test_novel_to_script_happy_path_overrides_script_format_to_custom(
 
 
 async def test_novel_to_script_critic_allows_null_rewrite_instructions(client_with_llm_and_embeddings, llm_stub):
+    await _set_global_script_format(client_with_llm_and_embeddings, "stage_play")
     brief = await client_with_llm_and_embeddings.post(
         "/api/briefs",
         json={"title": "测试作品", "content": {"output_spec": {"script_format": "stage_play"}}},
@@ -1382,6 +1399,7 @@ async def test_novel_to_script_critic_allows_null_rewrite_instructions(client_wi
 
 
 async def test_novel_to_script_conversion_output_spec_overrides_snapshot(client_with_llm_and_embeddings, llm_stub):
+    await _set_global_script_format(client_with_llm_and_embeddings, "stage_play")
     patched = await client_with_llm_and_embeddings.patch(
         "/api/settings/prompt-presets",
         json={
