@@ -24,10 +24,10 @@ def upgrade() -> None:
         sa.Column("key", sa.String(length=255), primary_key=True, nullable=False),
         sa.Column("value", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_app_settings_updated_at", "app_settings", ["updated_at"])
@@ -36,4 +36,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_app_settings_updated_at", table_name="app_settings")
     op.drop_table("app_settings")
-

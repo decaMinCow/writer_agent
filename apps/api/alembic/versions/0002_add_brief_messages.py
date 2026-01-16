@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column("content_text", sa.Text(), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_brief_messages_brief_id", "brief_messages", ["brief_id"])
@@ -47,5 +47,6 @@ def downgrade() -> None:
     op.drop_index("ix_brief_messages_created_at", table_name="brief_messages")
     op.drop_index("ix_brief_messages_brief_id", table_name="brief_messages")
     op.drop_table("brief_messages")
-    op.execute("DROP TYPE IF EXISTS brief_message_role")
-
+    bind = op.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        op.execute("DROP TYPE IF EXISTS brief_message_role")

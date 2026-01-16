@@ -40,7 +40,7 @@ def upgrade() -> None:
         sa.Column("embedding", Vector(1536), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_memory_chunks_brief_snapshot_id", "memory_chunks", ["brief_snapshot_id"])
@@ -51,4 +51,3 @@ def downgrade() -> None:
     op.drop_index("ix_memory_chunks_artifact_version_id", table_name="memory_chunks")
     op.drop_index("ix_memory_chunks_brief_snapshot_id", table_name="memory_chunks")
     op.drop_table("memory_chunks")
-

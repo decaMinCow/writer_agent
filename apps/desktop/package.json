@@ -1,0 +1,42 @@
+{
+  "name": "writer-agent-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.writeragent.desktop",
+    "productName": "Writer Agent",
+    "files": [
+      "main.js"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/build",
+        "to": "web"
+      },
+      {
+        "from": "../api/dist",
+        "to": "api"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  }
+}

@@ -33,10 +33,10 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_open_threads_snapshot", "open_threads", ["brief_snapshot_id"])
@@ -62,7 +62,7 @@ def upgrade() -> None:
         sa.Column("quote", sa.Text(), nullable=True),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_open_thread_refs_thread", "open_thread_refs", ["thread_id"])
@@ -80,4 +80,3 @@ def downgrade() -> None:
     op.drop_index("ix_open_threads_status", table_name="open_threads")
     op.drop_index("ix_open_threads_snapshot", table_name="open_threads")
     op.drop_table("open_threads")
-

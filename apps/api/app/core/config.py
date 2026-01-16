@@ -8,10 +8,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_env: str = Field(default="dev", validation_alias="APP_ENV")
+    auto_migrate: bool = Field(default=False, validation_alias="AUTO_MIGRATE")
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@localhost:5432/writer_agent",
         validation_alias="DATABASE_URL",
     )
+    static_dir: str | None = Field(default=None, validation_alias="STATIC_DIR")
     cors_allow_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         validation_alias="CORS_ALLOW_ORIGINS",
@@ -32,6 +34,9 @@ class Settings(BaseSettings):
     )
     openai_timeout_s: float = Field(default=60, validation_alias="OPENAI_TIMEOUT_S")
     openai_max_retries: int = Field(default=2, validation_alias="OPENAI_MAX_RETRIES")
+    license_public_key: str | None = Field(default=None, validation_alias="LICENSE_PUBLIC_KEY")
+    license_required: bool = Field(default=False, validation_alias="LICENSE_REQUIRED")
+    license_machine_salt: str = Field(default="writer_agent2", validation_alias="LICENSE_MACHINE_SALT")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 

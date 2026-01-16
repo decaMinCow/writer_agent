@@ -73,6 +73,14 @@ export type LlmProviderSettings = {
 	[key: string]: unknown;
 };
 
+export type LicenseStatus = {
+	enabled: boolean;
+	authorized: boolean;
+	machine_code: string;
+	license: Record<string, unknown> | null;
+	error: string | null;
+};
+
 export type BriefSnapshotRead = {
 	id: string;
 	brief_id: string;
@@ -333,6 +341,23 @@ export async function patchLlmProviderSettings(payload: {
 	return await fetchJson<LlmProviderSettings>('/api/settings/llm-provider', {
 		method: 'PATCH',
 		body: JSON.stringify(payload),
+	});
+}
+
+export async function getLicenseStatus(): Promise<LicenseStatus> {
+	return await fetchJson<LicenseStatus>('/api/license/status');
+}
+
+export async function activateLicense(licenseCode: string): Promise<LicenseStatus> {
+	return await fetchJson<LicenseStatus>('/api/license/activate', {
+		method: 'POST',
+		body: JSON.stringify({ license_code: licenseCode }),
+	});
+}
+
+export async function clearLicense(): Promise<LicenseStatus> {
+	return await fetchJson<LicenseStatus>('/api/license/clear', {
+		method: 'POST',
 	});
 }
 

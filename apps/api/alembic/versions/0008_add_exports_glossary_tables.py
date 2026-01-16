@@ -32,10 +32,10 @@ def upgrade() -> None:
         sa.Column("replacement", sa.String(length=255), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index(
@@ -50,4 +50,3 @@ def downgrade() -> None:
     op.drop_index("ix_snapshot_glossary_entries_term", table_name="snapshot_glossary_entries")
     op.drop_index("ix_snapshot_glossary_entries_snapshot", table_name="snapshot_glossary_entries")
     op.drop_table("snapshot_glossary_entries")
-

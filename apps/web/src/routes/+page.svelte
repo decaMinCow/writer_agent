@@ -19,6 +19,9 @@
 		getKnowledgeGraph,
 		createArtifactVersion,
 		createGlossaryEntry,
+		getLicenseStatus,
+		activateLicense,
+		clearLicense,
 		listArtifacts,
 		listArtifactVersions,
 		listBriefMessages,
@@ -61,6 +64,7 @@
 		type BriefSnapshotRead,
 		type GapReport,
 		type KnowledgeGraphRead,
+		type LicenseStatus,
 		type LintIssueRead,
 		type OpenThreadRead,
 		type OpenThreadRefRead,
@@ -114,6 +118,13 @@
 	let providerMaxRetriesDraft = '2';
 	let providerApiKeyDraft = '';
 	let savingProviderSettings = false;
+
+	let licenseStatus: LicenseStatus | null = null;
+	let licenseCodeDraft = '';
+	let savingLicense = false;
+	let refreshingLicense = false;
+	let licenseExpiresAt: string | null = null;
+	let licenseMachineCode = '';
 
 	let newBriefTitle = '';
 	let creatingBrief = false;
@@ -497,6 +508,18 @@
 		}
 	}
 
+	async function refreshLicenseStatus() {
+		error = null;
+		refreshingLicense = true;
+		try {
+			licenseStatus = await getLicenseStatus();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			refreshingLicense = false;
+		}
+	}
+
 	async function saveProviderSettings() {
 		error = null;
 		savingProviderSettings = true;
@@ -545,6 +568,41 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			savingProviderSettings = false;
+		}
+	}
+
+	async function activateLicenseCode() {
+		const code = licenseCodeDraft.trim();
+		if (!code) return;
+		error = null;
+		savingLicense = true;
+		try {
+			licenseStatus = await activateLicense(code);
+			licenseCodeDraft = '';
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingLicense = false;
+		}
+	}
+
+	async function clearLicenseCode() {
+		error = null;
+		savingLicense = true;
+		try {
+			licenseStatus = await clearLicense();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingLicense = false;
+		}
+	}
+
+	async function copyToClipboard(value: string) {
+		try {
+			await navigator.clipboard.writeText(value);
+		} catch {
+			// ignore clipboard failures
 		}
 	}
 
@@ -1914,6 +1972,20 @@
 		runCritic = critic && typeof critic === 'object' ? (critic as Record<string, unknown>) : null;
 	}
 
+	$: {
+		const raw =
+			licenseStatus &&
+			licenseStatus.license &&
+			typeof (licenseStatus.license as any).expires_at === 'string'
+				? String((licenseStatus.license as any).expires_at)
+				: null;
+		licenseExpiresAt = raw;
+	}
+
+	$: {
+		licenseMachineCode = licenseStatus?.machine_code ?? '';
+	}
+
 	function criticInState(state: Record<string, unknown>): boolean {
 		return Object.prototype.hasOwnProperty.call(state, 'critic');
 	}
@@ -1954,6 +2026,7 @@
 		await refreshAll();
 		await refreshSettings();
 		await refreshProviderSettings();
+		await refreshLicenseStatus();
 	});
 
 	onDestroy(() => {
@@ -2747,6 +2820,83 @@
 				</div>
 				<div class="min-h-0 flex-1 overflow-auto p-4">
 					{#if rightPaneTab === 'settings'}
+					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+						<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
+							<span>授权与激活</span>
+							<button
+								class="rounded bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
+								onclick={refreshLicenseStatus}
+								disabled={refreshingLicense}
+							>
+								刷新
+							</button>
+						</div>
+
+						{#if licenseStatus}
+							<div class="mb-2 text-[10px] text-zinc-500">
+								授权校验：{licenseStatus.enabled ? '已启用' : '未启用'}
+								· 状态：{licenseStatus.authorized ? '已授权' : '未授权'}
+							</div>
+							{#if licenseStatus.error}
+								<div class="mb-2 text-[10px] text-red-300">错误：{licenseStatus.error}</div>
+							{/if}
+							<label class="block text-xs">
+								<div class="mb-1 text-[10px] text-zinc-500">机器码（发给管理员生成授权码）</div>
+								<div class="flex items-center gap-2">
+									<input
+										class="flex-1 rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-1.5 text-xs text-zinc-200 outline-none"
+										readonly
+										value={licenseMachineCode}
+									/>
+									<button
+										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700"
+										onclick={() => copyToClipboard(licenseMachineCode)}
+										disabled={!licenseMachineCode}
+									>
+										复制
+									</button>
+								</div>
+							</label>
+							{#if licenseExpiresAt}
+								<div class="mt-2 text-[10px] text-zinc-500">
+									到期时间：{licenseExpiresAt}
+								</div>
+							{:else}
+								<div class="mt-2 text-[10px] text-zinc-500">到期时间：未设置</div>
+							{/if}
+							<label class="mt-3 block text-xs">
+								<div class="mb-1 text-[10px] text-zinc-500">授权码</div>
+								<textarea
+									class="w-full rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-2 text-xs text-zinc-200 outline-none"
+									rows="3"
+									placeholder="粘贴授权码后点击激活"
+									bind:value={licenseCodeDraft}
+									disabled={savingLicense}
+								></textarea>
+							</label>
+							<div class="mt-2 flex gap-2">
+								<button
+									class="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold hover:bg-emerald-600 disabled:opacity-50"
+									onclick={activateLicenseCode}
+									disabled={savingLicense || !licenseCodeDraft.trim()}
+								>
+									激活授权
+								</button>
+								<button
+									class="rounded-md bg-zinc-800 px-3 py-2 text-xs hover:bg-zinc-700 disabled:opacity-50"
+									onclick={clearLicenseCode}
+									disabled={savingLicense}
+								>
+									清除授权
+								</button>
+							</div>
+							<div class="mt-2 text-[10px] text-zinc-500">
+								提示：未启用授权时（未配置公钥），授权不会生效；桌面版默认启用授权校验。
+							</div>
+						{:else}
+							<div class="text-xs text-zinc-500">未加载（请检查 API 是否可用）</div>
+						{/if}
+					</div>
 					<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 						<div class="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-300">
 							<span>模型提供商（OpenAI 兼容）</span>

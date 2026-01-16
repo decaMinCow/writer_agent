@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import uuid
 from typing import Any
 
@@ -8,6 +9,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import MemoryChunk
 from app.llm.embeddings_client import EmbeddingsClient
+
+
+def _cosine_distance(a: object, b: list[float]) -> float:
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    try:
+        iterator = iter(a)  # type: ignore[arg-type]
+    except TypeError:
+        return 1.0
+
+    for ax, bx in zip(iterator, b, strict=False):
+        a_f = float(ax)
+        b_f = float(bx)
+        dot += a_f * b_f
+        norm_a += a_f * a_f
+        norm_b += b_f * b_f
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 1.0
+    return 1.0 - (dot / (math.sqrt(norm_a) * math.sqrt(norm_b)))
 
 
 def chunk_text(text: str, *, max_chars: int = 900, overlap_chars: int = 100) -> list[str]:
@@ -94,12 +115,22 @@ async def retrieve_evidence(
     limit = max(1, min(limit, 20))
     query_vec = (await embeddings.embed(texts=[query]))[0]
 
-    stmt = (
-        select(MemoryChunk)
-        .where(MemoryChunk.brief_snapshot_id == brief_snapshot_id)
-        .order_by(MemoryChunk.embedding.cosine_distance(query_vec))
-        .limit(limit)
-    )
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    bind = session.get_bind()
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
 
+    if dialect_name == "postgresql":
+        stmt = (
+            select(MemoryChunk)
+            .where(MemoryChunk.brief_snapshot_id == brief_snapshot_id)
+            .order_by(MemoryChunk.embedding.cosine_distance(query_vec))
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    result = await session.execute(
+        select(MemoryChunk).where(MemoryChunk.brief_snapshot_id == brief_snapshot_id)
+    )
+    rows = list(result.scalars().all())
+    rows.sort(key=lambda row: _cosine_distance(row.embedding, query_vec))
+    return rows[:limit]

@@ -32,7 +32,7 @@ def upgrade() -> None:
         sa.Column("entity_type", sa.String(length=64), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_kg_entities_snapshot", "kg_entities", ["brief_snapshot_id"])
@@ -62,7 +62,7 @@ def upgrade() -> None:
         ),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_kg_relations_snapshot", "kg_relations", ["brief_snapshot_id"])
@@ -89,7 +89,7 @@ def upgrade() -> None:
         ),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_kg_events_snapshot", "kg_events", ["brief_snapshot_id"])
@@ -115,7 +115,7 @@ def upgrade() -> None:
         ),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_lint_issues_snapshot", "lint_issues", ["brief_snapshot_id"])

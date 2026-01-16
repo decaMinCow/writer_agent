@@ -43,7 +43,7 @@ def upgrade() -> None:
         sa.Column("fact_changes", sa.Text(), nullable=False),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_propagation_events_snapshot", "propagation_events", ["brief_snapshot_id"])
@@ -91,7 +91,7 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_artifact_impacts_snapshot", "artifact_impacts", ["brief_snapshot_id"])
@@ -110,4 +110,3 @@ def downgrade() -> None:
     op.drop_index("ix_propagation_events_edited_version", table_name="propagation_events")
     op.drop_index("ix_propagation_events_snapshot", table_name="propagation_events")
     op.drop_table("propagation_events")
-

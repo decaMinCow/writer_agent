@@ -19,7 +19,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    bind = op.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
     op.create_table(
         "briefs",
@@ -27,10 +29,10 @@ def upgrade() -> None:
         sa.Column("title", sa.String(length=255), nullable=True),
         sa.Column("content", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
 
@@ -46,7 +48,7 @@ def upgrade() -> None:
         sa.Column("label", sa.String(length=255), nullable=True),
         sa.Column("content", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_brief_snapshots_brief_id", "brief_snapshots", ["brief_id"])
@@ -62,10 +64,10 @@ def upgrade() -> None:
         sa.Column("title", sa.String(length=255), nullable=True),
         sa.Column("ordinal", sa.Integer(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
 
@@ -99,10 +101,10 @@ def upgrade() -> None:
         sa.Column("state", sa.JSON(), nullable=False),
         sa.Column("error", sa.JSON(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_workflow_runs_brief_snapshot_id", "workflow_runs", ["brief_snapshot_id"])
@@ -136,10 +138,10 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_workflow_step_runs_workflow_run_id", "workflow_step_runs", ["workflow_run_id"])
@@ -169,7 +171,7 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index("ix_artifact_versions_artifact_id", "artifact_versions", ["artifact_id"])
@@ -189,4 +191,6 @@ def downgrade() -> None:
     op.drop_table("brief_snapshots")
     op.drop_table("briefs")
 
-    op.execute("DROP EXTENSION IF EXISTS vector")
+    bind = op.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        op.execute("DROP EXTENSION IF EXISTS vector")
