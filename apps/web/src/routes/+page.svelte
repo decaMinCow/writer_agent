@@ -29,6 +29,7 @@
 		listBriefs,
 		listGlossaryEntries,
 		listLintIssues,
+		repairStoryLint,
 		listOpenThreadRefs,
 		listOpenThreads,
 		exportNovelMarkdown,
@@ -65,6 +66,7 @@
 		type KnowledgeGraphRead,
 		type LicenseStatus,
 		type LintIssueRead,
+		type LintRepairResponse,
 		type OpenThreadRead,
 		type OpenThreadRefRead,
 		type PropagationEventRead,
@@ -201,6 +203,9 @@
 	let rebuildingKg = false;
 	let runningLint = false;
 	let lintUseLlm = true;
+	let repairingLint = false;
+	let lintRepairableIssues: LintIssueRead[] = [];
+	let lintRepairSummary: string | null = null;
 
 	type RightPaneTab = 'project' | 'assets' | 'settings';
 	const RIGHT_PANE_TAB_STORAGE_KEY = 'writer_agent2:right_pane_tab';
@@ -710,6 +715,7 @@
 		if (!selectedSnapshot) return;
 		error = null;
 		loadingAnalysis = true;
+		lintRepairSummary = null;
 		try {
 			[knowledgeGraph, lintIssues, openThreads, glossaryEntries] = await Promise.all([
 				getKnowledgeGraph(selectedSnapshot.id),
@@ -751,6 +757,42 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			runningLint = false;
+		}
+	}
+
+	$: lintRepairableIssues = lintIssues.filter((i) => Boolean(i.artifact_version_id));
+
+	async function repairLint() {
+		if (!selectedSnapshot) return;
+		lintRepairSummary = null;
+
+		const targets = lintRepairableIssues.length;
+		if (targets <= 0) {
+			lintRepairSummary = '暂无可自动修复的问题（需要先“运行”生成问题列表）。';
+			return;
+		}
+
+		const maxTargets = 10;
+		const planned = Math.min(targets, maxTargets);
+		if (
+			!confirm(
+				`将针对 ${planned} 个产物版本自动修复（创建新版本，不覆盖原文）。\n\n提示：无法定位到具体产物版本的问题会被跳过。\n\n继续？`,
+			)
+		) {
+			return;
+		}
+
+		error = null;
+		repairingLint = true;
+		try {
+			const resp = await repairStoryLint(selectedSnapshot.id, { max_targets: maxTargets });
+			lintRepairSummary = `已创建 ${resp.created_artifact_version_ids.length} 个修复版本；跳过 ${resp.skipped_count} 项。已自动重新运行检查。`;
+			await refreshAll();
+			await runLint();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			repairingLint = false;
 		}
 	}
 
@@ -964,6 +1006,7 @@
 		}
 		selectedSnapshot = snap;
 		showSnapshotJson = false;
+		lintRepairSummary = null;
 		ntsSourceSnapshotIdDraft = snap.id;
 		syncPromptPresetDrafts();
 			try {
@@ -1665,6 +1708,70 @@
 		return parts.join(' · ');
 	}
 
+	function workflowStepNameLabel(stepName: string): string {
+		switch (stepName) {
+			case 'novel_outline':
+				return '小说大纲';
+			case 'novel_beats':
+				return '章节拆分';
+			case 'novel_chapter_draft':
+				return '章节草稿';
+			case 'novel_chapter_critic':
+				return '章节审校';
+			case 'novel_chapter_fix':
+				return '章节修复';
+			case 'novel_chapter_commit':
+				return '章节提交';
+			case 'script_scene_list':
+				return '场景列表';
+			case 'script_scene_draft':
+				return '场景草稿';
+			case 'script_scene_critic':
+				return '场景审校';
+			case 'script_scene_fix':
+				return '场景修复';
+			case 'script_scene_commit':
+				return '场景提交';
+			case 'nts_chapter_plan':
+				return '拆集计划';
+			case 'nts_episode_breakdown':
+				return '拆解';
+			case 'nts_episode_draft':
+				return '分集草稿';
+			case 'nts_episode_critic':
+				return '分集审校';
+			case 'nts_episode_fix':
+				return '分集修复';
+			case 'nts_episode_commit':
+				return '分集提交';
+			case 'nts_scene_list':
+				return '场景列表（转写）';
+			case 'nts_scene_draft':
+				return '场景草稿（转写）';
+			case 'nts_scene_critic':
+				return '场景审校（转写）';
+			case 'nts_scene_fix':
+				return '场景修复（转写）';
+			case 'nts_scene_commit':
+				return '场景提交（转写）';
+			case 'intervention':
+				return '节点干预';
+			case 'failed':
+				return '失败';
+			default:
+				return stepName;
+		}
+	}
+
+	function interventionTargetDisplay(step: WorkflowStepRunRead): string {
+		const raw = ((step.outputs as any)?.target_step_name as unknown) ?? null;
+		if (typeof raw === 'string') {
+			const trimmed = raw.trim();
+			if (trimmed) return `${workflowStepNameLabel(trimmed)}（${trimmed}）`;
+		}
+		return '运行';
+	}
+
 	function runDisplayName(run: WorkflowRunRead): string {
 		const kindLabel =
 			run.kind === 'novel' ? '小说' : run.kind === 'script' ? '剧本' : run.kind === 'novel_to_script' ? '小说→剧本' : run.kind;
@@ -2108,7 +2215,7 @@
 						{#if selectedBrief}
 							<div class="mb-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 								<div class="mb-2 text-xs font-semibold text-zinc-300">
-									从版本（Snapshot）创建 Run
+									从版本（Snapshot）创建工作流
 								</div>
 								<div class="flex flex-wrap items-center gap-2">
 									<div class="text-[11px] text-zinc-400">
@@ -2178,7 +2285,7 @@
 												{/each}
 											</select>
 											<div class="mt-1 text-[10px] text-zinc-500">
-												提示：可以选择“小说已生成完成”的旧版本；Run 仍会归档在当前选中 Snapshot 下。
+												提示：可以选择“小说已生成完成”的旧版本；该工作流运行仍会归档在当前选中 Snapshot 下。
 											</div>
 										</label>
 
@@ -2342,7 +2449,8 @@
 
 										{#if lastFailedStep}
 											<div class="mt-2 text-[11px] text-red-200/80">
-												最近失败 step：{lastFailedStep.step_index ?? ''} · {lastFailedStep.step_name}
+												最近失败步骤：{lastFailedStep.step_index ?? ''} · {workflowStepNameLabel(lastFailedStep.step_name)}
+												<span class="ml-1 text-[10px] text-red-200/60">({lastFailedStep.step_name})</span>
 											</div>
 											{#if lastFailedStep.error}
 												<pre
@@ -2367,14 +2475,14 @@
 												</div>
 												{#if selectedStep?.status === 'running'}
 													<div class="mb-2 text-[10px] text-amber-200/70">
-														注意：当前 step 正在运行中；以下可能是上一次审校结果。请查看「Step 输出 · 实时输出（流式）」。
+														注意：当前步骤正在运行中；以下可能是上一次审校结果。请查看「步骤输出 · 实时输出（流式）」。
 													</div>
 												{/if}
 	
 												{#if Array.isArray((runCritic as any).hard_errors) &&
 												((runCritic as any).hard_errors as unknown[]).length > 0}
 													<div class="mb-2 text-[11px] text-amber-100/90">
-													<div class="mb-1 font-semibold text-amber-200/80">Hard Errors</div>
+													<div class="mb-1 font-semibold text-amber-200/80">硬性错误</div>
 													<div class="space-y-1">
 														{#each (runCritic as any).hard_errors as e (String(e))}
 															<div class="rounded border border-amber-900/40 bg-amber-950/10 px-2 py-1">
@@ -2389,7 +2497,7 @@
 											{#if typeof (runCritic as any).rewrite_instructions === 'string' &&
 											((runCritic as any).rewrite_instructions as string).trim().length > 0}
 												<div class="mb-2 text-[11px]">
-													<div class="mb-1 font-semibold text-amber-200/80">Rewrite Instructions</div>
+													<div class="mb-1 font-semibold text-amber-200/80">重写指令</div>
 													<div class="whitespace-pre-wrap rounded border border-amber-900/40 bg-amber-950/10 p-2 text-amber-100/90">
 														{(runCritic as any).rewrite_instructions}
 													</div>
@@ -2410,7 +2518,7 @@
 												)}
 												{#if entries.length > 0}
 													<div class="text-[11px] text-amber-100/90">
-														<span class="font-semibold text-amber-200/80">Soft Scores：</span>
+														<span class="font-semibold text-amber-200/80">软评分：</span>
 														{entries.map(([k, v]) => `${k}:${v}`).join(' · ')}
 													</div>
 												{/if}
@@ -2424,7 +2532,7 @@
 
 									<div class="mb-3 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 										<div class="mb-2 flex items-center justify-between gap-2">
-											<div class="text-xs font-semibold text-zinc-300">Run State（可编辑）</div>
+											<div class="text-xs font-semibold text-zinc-300">运行状态（可编辑）</div>
 											<div class="flex gap-2">
 											<button
 												class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
@@ -2448,7 +2556,7 @@
 										disabled={savingRunState}
 									></textarea>
 									<div class="mt-2 text-[10px] text-zinc-500">
-										提示：这里只是最小 MVP（直接 PATCH run.state）。编辑错误 JSON 会导致保存失败。
+										说明：这是工作流运行时的 `run.state`（JSON）。常用：出错后修正 `cursor/草稿/审校信息` 再点「重试/下一步」；填错 JSON 会保存失败。
 									</div>
 								</div>
 
@@ -2456,11 +2564,12 @@
 									<div class="mb-2 flex items-center justify-between gap-2">
 										<div class="text-xs font-semibold text-zinc-300">节点对话干预（MVP）</div>
 										<div class="text-[11px] text-zinc-500">
-											目标：
+											目标节点：
 											{#if selectedStep}
-												{selectedStep.step_index ?? ''} · {selectedStep.step_name}
+												{selectedStep.step_index ?? ''} · {workflowStepNameLabel(selectedStep.step_name)}
+												<span class="ml-1 text-[10px] text-zinc-500">({selectedStep.step_name})</span>
 											{:else}
-												Run
+												运行
 											{/if}
 										</div>
 									</div>
@@ -2483,8 +2592,8 @@
 														</div>
 													</div>
 													<div class="mb-1 text-[10px] text-zinc-500">
-														目标：
-														{((step.outputs as any)?.target_step_name as string) ?? 'run'}
+														目标节点：
+														{interventionTargetDisplay(step)}
 													</div>
 													<div class="mb-2">
 														<div class="mb-0.5 text-[10px] text-zinc-500">指令</div>
@@ -2505,7 +2614,7 @@
 
 									<textarea
 										class="max-h-40 w-full resize-none overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-sm leading-5 outline-none placeholder:text-zinc-600"
-										placeholder={selectedRun ? '输入干预指令…' : '请选择 Run…'}
+										placeholder={selectedRun ? '输入干预指令…' : '请选择运行…'}
 										rows="1"
 										bind:this={interventionTextarea}
 										bind:value={interventionDraft}
@@ -2545,20 +2654,24 @@
 											onclick={() => (selectedStep = step)}
 										>
 											<div class="flex items-center justify-between">
-												<div class="truncate">{step.step_index ?? ''} · {step.step_name}</div>
+												<div class="truncate">
+													{step.step_index ?? ''} · {workflowStepNameLabel(step.step_name)}
+													<span class="ml-1 text-[10px] text-zinc-500">({step.step_name})</span>
+												</div>
 												<div class="text-[10px] text-zinc-400">{workflowStatusLabel(step.status)}</div>
 											</div>
 										</button>
 									{/each}
 									{#if workflowSteps.length === 0}
-										<div class="text-xs text-zinc-500">暂无 steps</div>
+										<div class="text-xs text-zinc-500">暂无步骤</div>
 									{/if}
 								</div>
 
 								{#if selectedStep}
 									<div class="mt-4 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
 										<div class="mb-2 text-xs font-semibold text-zinc-300">
-											步骤输出 · {selectedStep.step_name}
+											步骤输出 · {workflowStepNameLabel(selectedStep.step_name)}
+											<span class="ml-1 text-[11px] font-normal text-zinc-500">({selectedStep.step_name})</span>
 										</div>
 										{#if selectedStep.status === 'running' ||
 										((llmStreamByStep[selectedStep.id] ?? '').length > 0)}
@@ -2891,7 +3004,7 @@
 									/>
 								</label>
 								<div class="text-[10px] text-zinc-500">
-									说明：这三项是执行稳定性参数（自动修复/自动重试），会影响小说/剧本/小说→剧本的工作流，并对已创建 Run
+									说明：这三项是执行稳定性参数（自动修复/自动重试），会影响小说/剧本/小说→剧本的工作流，并对已创建的运行
 									生效（从下一步/下一次重试开始）。
 								</div>
 								<button
@@ -3134,7 +3247,7 @@
 						{#if rightPaneTab === 'project'}
 						<div class="mt-6 rounded-md border border-zinc-800 bg-zinc-900 p-3">
 							<div class="mb-2 flex items-center justify-between gap-2">
-								<div class="text-xs font-semibold text-zinc-300">Brief 内容（结构化）</div>
+								<div class="text-xs font-semibold text-zinc-300">简报内容（结构化）</div>
 								<div class="flex items-center gap-2">
 									<button
 										class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] hover:bg-zinc-700 disabled:opacity-50"
@@ -3339,7 +3452,7 @@
 									</div>
 								</details>
 
-								<div class="mb-5">
+									<div class="mb-5">
 									<div class="mb-2 flex items-center justify-between gap-2">
 										<div class="text-[11px] font-semibold text-zinc-400">
 											一致性问题（{lintIssues.length}）
@@ -3350,6 +3463,14 @@
 												<span>AI 辅助</span>
 											</label>
 											<button
+												class="rounded-md bg-zinc-800 px-2 py-1 text-[10px] font-semibold hover:bg-zinc-700 disabled:opacity-50"
+												onclick={repairLint}
+												disabled={repairingLint || lintRepairableIssues.length === 0}
+												title="对可定位到产物版本的问题进行自动修复（创建新版本，不覆盖原文）"
+											>
+												{repairingLint ? '修复中…' : '一键修复'}
+											</button>
+											<button
 												class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold hover:bg-emerald-600 disabled:opacity-50"
 												onclick={runLint}
 												disabled={runningLint}
@@ -3358,6 +3479,12 @@
 											</button>
 										</div>
 									</div>
+
+									{#if lintRepairSummary}
+										<div class="mb-2 rounded-md border border-zinc-800 bg-zinc-950/30 px-2 py-2 text-[11px] text-zinc-300">
+											{lintRepairSummary}
+										</div>
+									{/if}
 
 									{#if lintIssues.length > 0}
 										<div class="max-h-44 space-y-1 overflow-auto">

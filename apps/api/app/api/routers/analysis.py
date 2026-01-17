@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     Artifact,
     ArtifactVersion,
+    ArtifactVersionSource,
     BriefSnapshot,
     KgEntity,
     KgEvent,
@@ -26,6 +27,10 @@ from app.schemas.kg import (
     KnowledgeGraphRebuildResponse,
 )
 from app.schemas.lint import LintIssueRead, LintRunResponse
+from app.schemas.lint import LintRepairRequest, LintRepairResponse
+from app.services.llm_provider import resolve_embeddings_client
+from app.services.memory_store import index_artifact_version
+from app.services.targeted_rewrite import rewrite_selected_text
 from app.services.kg_extraction import extract_kg_for_artifact_version
 from app.services.kg_store import PostgresKgStore
 from app.services.llm_provider import resolve_llm_client
@@ -352,3 +357,164 @@ async def run_story_linter(
         await session.refresh(issue)
 
     return LintRunResponse(issues=[LintIssueRead.model_validate(item) for item in created])
+
+
+def _repair_instruction_for_issues(issues: list[LintIssue]) -> str:
+    parts = ["请修复以下一致性问题，并尽量只改与问题相关的内容："]
+    for issue in issues:
+        parts.append(f"- [{issue.severity}] {issue.code}: {issue.message}")
+    parts.append("要求：输出修复后的正文（用于替换整篇内容），不要输出解释。")
+    return "\n".join(parts).strip()
+
+
+@router.post("/{snapshot_id}/lint/repair", response_model=LintRepairResponse)
+async def repair_lint_issues(
+    snapshot_id: uuid.UUID,
+    request: Request,
+    payload: LintRepairRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> LintRepairResponse:
+    snapshot = await _get_snapshot(session, snapshot_id)
+
+    llm = await resolve_llm_client(session=session, app=request.app)
+    if llm is None:
+        raise HTTPException(status_code=400, detail="openai_not_configured")
+
+    max_targets = max(1, min(int(payload.max_targets or 10), 50))
+
+    result = await session.execute(
+        select(LintIssue)
+        .where(LintIssue.brief_snapshot_id == snapshot.id)
+        .order_by(LintIssue.created_at.asc())
+    )
+    issues = list(result.scalars().all())
+
+    grouped: dict[uuid.UUID, list[LintIssue]] = {}
+    for issue in issues:
+        if issue.artifact_version_id is None:
+            continue
+        grouped.setdefault(issue.artifact_version_id, []).append(issue)
+
+    targets = list(grouped.items())[:max_targets]
+
+    repaired_artifact_version_ids: list[uuid.UUID] = []
+    created_artifact_version_ids: list[uuid.UUID] = []
+    skipped: list[dict[str, Any]] = []
+
+    embeddings = await resolve_embeddings_client(session=session, app=request.app)
+
+    for artifact_version_id, related in targets:
+        base_version = await session.get(ArtifactVersion, artifact_version_id)
+        if base_version is None:
+            skipped.append(
+                {
+                    "artifact_version_id": str(artifact_version_id),
+                    "reason": "artifact_version_not_found",
+                }
+            )
+            continue
+        if base_version.brief_snapshot_id != snapshot.id:
+            skipped.append(
+                {
+                    "artifact_version_id": str(artifact_version_id),
+                    "reason": "artifact_version_not_in_snapshot",
+                }
+            )
+            continue
+
+        artifact = await session.get(Artifact, base_version.artifact_id)
+        if artifact is None:
+            skipped.append(
+                {
+                    "artifact_version_id": str(artifact_version_id),
+                    "reason": "artifact_not_found",
+                }
+            )
+            continue
+
+        text = base_version.content_text or ""
+        if not text.strip():
+            skipped.append(
+                {
+                    "artifact_version_id": str(artifact_version_id),
+                    "reason": "empty_content",
+                }
+            )
+            continue
+
+        instruction = _repair_instruction_for_issues(related)
+        replacement = await rewrite_selected_text(
+            llm=llm,
+            brief_json=dict(snapshot.content or {}),
+            artifact_meta={
+                "artifact_id": str(artifact.id),
+                "artifact_version_id": str(base_version.id),
+                "kind": str(artifact.kind.value),
+                "ordinal": artifact.ordinal,
+                "title": artifact.title,
+                "brief_snapshot_id": str(snapshot.id),
+            },
+            instruction=instruction,
+            selected_text=text,
+            context_before="",
+            context_after="",
+        )
+        if not replacement.strip():
+            skipped.append(
+                {
+                    "artifact_version_id": str(artifact_version_id),
+                    "reason": "rewrite_empty",
+                }
+            )
+            continue
+
+        new_version = ArtifactVersion(
+            artifact_id=artifact.id,
+            source=ArtifactVersionSource.agent,
+            content_text=replacement,
+            meta={
+                "lint_repair_from_version_id": str(base_version.id),
+                "lint_repair_issue_ids": [str(i.id) for i in related],
+                "lint_repair_issue_codes": [i.code for i in related],
+            },
+            workflow_run_id=base_version.workflow_run_id,
+            brief_snapshot_id=snapshot.id,
+        )
+        session.add(new_version)
+        await session.commit()
+        await session.refresh(new_version)
+
+        repaired_artifact_version_ids.append(base_version.id)
+        created_artifact_version_ids.append(new_version.id)
+
+        if embeddings is not None:
+            try:
+                await index_artifact_version(
+                    session=session,
+                    embeddings=embeddings,
+                    brief_snapshot_id=snapshot.id,
+                    artifact_version_id=new_version.id,
+                    content_text=replacement,
+                    meta={
+                        "kind": str(artifact.kind.value),
+                        "ordinal": artifact.ordinal,
+                        "source": str(ArtifactVersionSource.agent.value),
+                    },
+                )
+            except Exception:
+                # Best-effort indexing; do not fail the repair action.
+                pass
+
+    skipped_count = 0
+    # Count non-target issues as skipped for summary clarity.
+    skipped_count += sum(1 for issue in issues if issue.artifact_version_id is None)
+    # Count targets we couldn't repair.
+    skipped_count += len(targets) - len(created_artifact_version_ids)
+
+    return LintRepairResponse(
+        repaired_count=len(created_artifact_version_ids),
+        skipped_count=skipped_count,
+        repaired_artifact_version_ids=repaired_artifact_version_ids,
+        created_artifact_version_ids=created_artifact_version_ids,
+        skipped=skipped,
+    )

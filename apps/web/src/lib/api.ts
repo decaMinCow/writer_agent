@@ -191,6 +191,14 @@ export type LintRunResponse = {
 	issues: LintIssueRead[];
 };
 
+export type LintRepairResponse = {
+	repaired_count: number;
+	skipped_count: number;
+	repaired_artifact_version_ids: string[];
+	created_artifact_version_ids: string[];
+	skipped: Array<Record<string, unknown>>;
+};
+
 export type PropagationPreviewRequest = {
 	base_artifact_version_id: string;
 	edited_artifact_version_id: string;
@@ -713,6 +721,17 @@ export async function runStoryLint(
 		`/api/brief-snapshots/${snapshotId}/lint?use_llm=${encodeURIComponent(String(use_llm))}`,
 		{ method: 'POST' },
 	);
+}
+
+export async function repairStoryLint(
+	snapshotId: string,
+	payload?: { max_targets?: number },
+): Promise<LintRepairResponse> {
+	const max_targets = payload?.max_targets ?? 10;
+	return await fetchJson<LintRepairResponse>(`/api/brief-snapshots/${snapshotId}/lint/repair`, {
+		method: 'POST',
+		body: JSON.stringify({ max_targets }),
+	});
 }
 
 export async function listImpacts(

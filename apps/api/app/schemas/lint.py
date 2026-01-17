@@ -23,3 +23,14 @@ class LintIssueRead(BaseModel):
 class LintRunResponse(BaseModel):
     issues: list[LintIssueRead] = Field(default_factory=list)
 
+
+class LintRepairRequest(BaseModel):
+    max_targets: int = 10
+
+
+class LintRepairResponse(BaseModel):
+    repaired_count: int
+    skipped_count: int
+    repaired_artifact_version_ids: list[uuid.UUID] = Field(default_factory=list)
+    created_artifact_version_ids: list[uuid.UUID] = Field(default_factory=list)
+    skipped: list[dict[str, Any]] = Field(default_factory=list)

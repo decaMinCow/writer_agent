@@ -26,6 +26,10 @@
       {
         "from": "../api/dist",
         "to": "api"
+      },
+      {
+        "from": "resources",
+        "to": "resources"
       }
     ],
     "mac": {

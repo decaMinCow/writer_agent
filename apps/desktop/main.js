@@ -12,6 +12,39 @@ function delay(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readTextIfExists(filePath) {
+	try {
+		if (!filePath) return '';
+		if (!fs.existsSync(filePath)) return '';
+		return String(fs.readFileSync(filePath, 'utf-8') || '').trim();
+	} catch {
+		return '';
+	}
+}
+
+function readJsonIfExists(filePath) {
+	const raw = readTextIfExists(filePath);
+	if (!raw) return null;
+	try {
+		const parsed = JSON.parse(raw);
+		return parsed && typeof parsed === 'object' ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+function readDesktopConfig() {
+	const fromPackaged = readJsonIfExists(
+		path.join(process.resourcesPath, 'resources', 'desktop_config.json'),
+	);
+	if (fromPackaged) return fromPackaged;
+
+	const fromDev = readJsonIfExists(path.join(__dirname, 'resources', 'desktop_config.json'));
+	if (fromDev) return fromDev;
+
+	return null;
+}
+
 async function isPortAvailable(port) {
 	return await new Promise((resolve) => {
 		const server = net.createServer();
@@ -86,14 +119,47 @@ async function startApi(port) {
 		return;
 	}
 
+	const desktopConfig = readDesktopConfig() || {};
+	const licenseRequiredFromConfig =
+		typeof desktopConfig.license_required === 'boolean'
+			? desktopConfig.license_required
+			: null;
+
+	const publicKeyFromEnv =
+		process.env.WRITER_AGENT_LICENSE_PUBLIC_KEY ||
+		process.env.LICENSE_PUBLIC_KEY ||
+		'';
+	const publicKeyFromConfig =
+		typeof desktopConfig.license_public_key === 'string' ? desktopConfig.license_public_key : '';
+	const publicKeyFromPackagedFile = readTextIfExists(
+		path.join(process.resourcesPath, 'resources', 'license_public_key.txt'),
+	);
+	const publicKeyFromDevFile = readTextIfExists(
+		path.join(__dirname, 'resources', 'license_public_key.txt'),
+	);
+	const licensePublicKey = (
+		publicKeyFromEnv ||
+		publicKeyFromConfig ||
+		publicKeyFromPackagedFile ||
+		publicKeyFromDevFile
+	).trim();
+
+	const defaultLicenseRequired =
+		licenseRequiredFromConfig !== null ? (licenseRequiredFromConfig ? '1' : '0') : null;
+
+	const licenseRequired =
+		defaultLicenseRequired ||
+		process.env.WRITER_AGENT_LICENSE_REQUIRED ||
+		'1';
+
 	const env = {
 		...process.env,
 		HOST: '127.0.0.1',
 		PORT: String(port),
 		DATABASE_URL: buildDatabaseUrl(userDataDir),
 		AUTO_MIGRATE: '1',
-		LICENSE_REQUIRED: process.env.WRITER_AGENT_LICENSE_REQUIRED || '1',
-		LICENSE_PUBLIC_KEY: process.env.WRITER_AGENT_LICENSE_PUBLIC_KEY || process.env.LICENSE_PUBLIC_KEY || '',
+		LICENSE_REQUIRED: licenseRequired,
+		LICENSE_PUBLIC_KEY: licensePublicKey,
 		LICENSE_MACHINE_SALT: process.env.WRITER_AGENT_LICENSE_MACHINE_SALT || 'writer_agent2',
 		STATIC_DIR: fs.existsSync(staticDir) ? staticDir : '',
 		PYTHONUNBUFFERED: '1',

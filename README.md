@@ -37,6 +37,21 @@ npm run dev -- --open
 
 ## Desktop build (Electron + offline licensing)
 
+### One-command Windows build (PowerShell)
+From repo root on Windows:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\\scripts\\build-desktop-win.ps1
+```
+Options:
+- `-Clean` remove previous `build/` + `dist/` outputs
+- `-SkipLicenseKeys` skip generating/copying the desktop public key (not recommended if licensing is enabled)
+- `-NoLicense` build an unlicensed desktop app (no activation; licensing disabled by `apps/desktop/resources/desktop_config.json`)
+
+Unlicensed shortcut:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\\scripts\\build-desktop-win-no-license.ps1 -Clean
+```
+
 ### Build the web UI (static)
 ```bash
 cd apps/web

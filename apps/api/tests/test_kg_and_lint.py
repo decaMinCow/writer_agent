@@ -219,3 +219,81 @@ async def test_story_linter_can_include_llm_issues(client_with_llm, llm_stub):
     assert len(issues) == 1
     assert issues[0]["code"] == "pov_drift"
     assert issues[0]["metadata"]["recommended_pov"] == "third_limited"
+
+
+async def test_story_lint_repair_creates_new_artifact_version_and_can_clear_issue(
+    client_with_llm, llm_stub
+):
+    await client_with_llm.patch(
+        "/api/settings/output-spec",
+        json={"script_format": "screenplay_int_ext"},
+    )
+    brief = await client_with_llm.post(
+        "/api/briefs",
+        json={"title": "测试作品", "content": {"output_spec": {"script_format": "screenplay_int_ext"}}},
+    )
+    assert brief.status_code == 200
+    brief_id = brief.json()["id"]
+
+    snap = await client_with_llm.post(f"/api/briefs/{brief_id}/snapshots", json={"label": "v1"})
+    assert snap.status_code == 200
+    snap_id = snap.json()["id"]
+
+    scene = await client_with_llm.post(
+        "/api/artifacts",
+        json={"kind": "script_scene", "ordinal": 1, "title": "第一场"},
+    )
+    assert scene.status_code == 200
+    scene_id = scene.json()["id"]
+
+    created = await client_with_llm.post(
+        f"/api/artifacts/{scene_id}/versions",
+        json={
+            "source": "agent",
+            "content_text": "第一场\n阿澄走进小巷。",
+            "metadata": {},
+            "brief_snapshot_id": snap_id,
+        },
+    )
+    assert created.status_code == 200
+    base_version_id = created.json()["id"]
+
+    run = await client_with_llm.post(
+        f"/api/brief-snapshots/{snap_id}/lint",
+        params={"use_llm": "false"},
+    )
+    assert run.status_code == 200
+    issues = run.json()["issues"]
+    assert any(
+        item["code"] == "missing_int_ext_heading" and item["artifact_version_id"] == base_version_id
+        for item in issues
+    )
+
+    llm_stub.outputs.append("INT. 小巷 - 日\n阿澄走进小巷。")
+
+    repaired = await client_with_llm.post(
+        f"/api/brief-snapshots/{snap_id}/lint/repair",
+        json={"max_targets": 10},
+    )
+    assert repaired.status_code == 200
+    assert repaired.json()["repaired_count"] == 1
+    assert len(repaired.json()["created_artifact_version_ids"]) == 1
+
+    versions = await client_with_llm.get(
+        f"/api/artifacts/{scene_id}/versions",
+        params={"brief_snapshot_id": snap_id},
+    )
+    assert versions.status_code == 200
+    items = versions.json()
+    assert len(items) >= 2
+    assert items[0]["id"] == repaired.json()["created_artifact_version_ids"][0]
+    assert items[0]["metadata"]["lint_repair_from_version_id"] == base_version_id
+    assert "INT." in items[0]["content_text"]
+
+    rerun = await client_with_llm.post(
+        f"/api/brief-snapshots/{snap_id}/lint",
+        params={"use_llm": "false"},
+    )
+    assert rerun.status_code == 200
+    rerun_issues = rerun.json()["issues"]
+    assert not any(item["code"] == "missing_int_ext_heading" for item in rerun_issues)

@@ -22,3 +22,9 @@ dist/
 # OS
 .DS_Store
 
+# Desktop licensing keys (keep private key out of git)
+apps/api/license_keys/
+
+# Desktop build resources (generated during packaging)
+apps/desktop/resources/license_public_key.txt
+apps/desktop/resources/desktop_config.json
