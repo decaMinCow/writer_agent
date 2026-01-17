@@ -31,7 +31,7 @@ jobs:
 
       - name: Build desktop installer (NSIS)
         run: |
-          pwsh -ExecutionPolicy Bypass -File .\scripts\build-desktop-win-no-license.ps1 -Clean
+          pwsh -ExecutionPolicy Bypass -File .\scripts\build-desktop-win.ps1 -NoLicense -SkipLicenseKeys -Clean
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -39,4 +39,3 @@ jobs:
           name: writer-agent-desktop-windows
           path: apps/desktop/dist/**
           if-no-files-found: error
-

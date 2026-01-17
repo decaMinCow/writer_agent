@@ -1,6 +1,4 @@
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
-
+[CmdletBinding()]
 param(
   [switch]$SkipNpmInstall,
   [switch]$SkipUvSync,
@@ -8,6 +6,9 @@ param(
   [switch]$NoLicense,
   [switch]$Clean
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
 function Info($msg) { Write-Host "[build] $msg" }
 
@@ -86,7 +87,11 @@ Info "1/3 Build web (static)..."
 Push-Location (Join-Path $root "apps/web")
 try {
   if (-not $SkipNpmInstall) {
-    npm ci | Out-Host
+    if (Test-Path (Join-Path (Get-Location) "package-lock.json")) {
+      npm ci | Out-Host
+    } else {
+      npm install | Out-Host
+    }
   }
   $env:SVELTE_ADAPTER = "static"
   $env:PUBLIC_API_BASE_URL = ""
@@ -110,7 +115,11 @@ Info "3/3 Build desktop installer (electron-builder / NSIS)..."
 Push-Location (Join-Path $root "apps/desktop")
 try {
   if (-not $SkipNpmInstall) {
-    npm ci | Out-Host
+    if (Test-Path (Join-Path (Get-Location) "package-lock.json")) {
+      npm ci | Out-Host
+    } else {
+      npm install | Out-Host
+    }
   }
   npm run build | Out-Host
 } finally {
